@@ -363,6 +363,10 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
         net.push(iface("docker0", 0.55, false));
     }
 
+    let mem_used = (mem_total as f64 * mem_pct / 100.0) as u64;
+    // Most of what programs do not need holds cached files.
+    let mem_cached = (mem_total - mem_used) * 7 / 10;
+
     let sample = Sample {
         ts,
         cpu: CpuUsage {
@@ -380,7 +384,17 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
             (p.cpu_base / 100.0 * p.cores as f64 * 1.15) as f32,
         ],
         mem_total,
-        mem_used: (mem_total as f64 * mem_pct / 100.0) as u64,
+        mem_used,
+        mem_cached,
+        mem_free: mem_total - mem_used - mem_cached,
+        mem_detail: vec![
+            ("Page cache".into(), mem_cached * 8 / 10),
+            ("Buffers".into(), mem_cached / 10),
+            ("Kernel caches, reclaimable".into(), mem_cached / 10),
+            ("Shared memory and tmpfs".into(), mem_used / 25),
+            ("Program data (anonymous)".into(), mem_used * 9 / 10),
+            ("Page tables".into(), mem_used / 200),
+        ],
         swap_total: 4 << 30,
         swap_used: if p.mem_pct > 90.0 { 2600 << 20 } else { 64 << 20 },
         rx_bps: rx,
@@ -454,4 +468,123 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
         )
     };
     (sample, docker)
+}
+
+/// A plausible inventory for the simulated servers.
+pub fn hardware(profile: usize) -> crate::hardware::Hardware {
+    use crate::hardware::{HwGroup, HwItem};
+    let p = &PROFILES[profile];
+    let item = |name: &str, props: &[(&str, &str)]| HwItem {
+        name: name.to_string(),
+        props: props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+    };
+    let group = |title: &str, note: &str, items: Vec<HwItem>| HwGroup {
+        title: title.to_string(),
+        note: note.to_string(),
+        items,
+    };
+    let modules = (p.mem_gb / 16).max(1) as usize;
+    let mut groups = vec![
+        group(
+            "System",
+            "",
+            vec![item(
+                "",
+                &[
+                    ("Manufacturer", "Supermicro"),
+                    ("Model", "AS-1114S-WN10RT"),
+                    ("Mainboard", "Supermicro H12SSW-NTR"),
+                    ("BIOS", "American Megatrends 2.8 (01/18/2024)"),
+                ],
+            )],
+        ),
+        group(
+            "Processor",
+            "",
+            vec![item(
+                "AMD EPYC 7543P 32-Core Processor",
+                &[
+                    ("Sockets", "1"),
+                    ("Cores per socket", &(p.cores / 2).max(1).to_string()),
+                    ("Threads per core", "2"),
+                    ("Max clock", "3700 MHz"),
+                    ("Architecture", "x86_64"),
+                    ("L3 cache", "256 MiB (8 instances)"),
+                ],
+            )],
+        ),
+        group(
+            "Memory",
+            &format!("{modules} of 8 slots used, up to 2 TB"),
+            (0..modules)
+                .map(|i| {
+                    item(
+                        &format!("DIMM{}", (b'A' + i as u8) as char),
+                        &[
+                            ("Size", "16 GB"),
+                            ("Type", "DDR4"),
+                            ("Speed", "3200 MT/s"),
+                            ("Manufacturer", "Samsung"),
+                            ("Part number", "M393A2K43DB3-CWE"),
+                        ],
+                    )
+                })
+                .collect(),
+        ),
+        group(
+            "Disks",
+            "",
+            p.drives
+                .iter()
+                .map(|(name, ..)| {
+                    if name.starts_with("nvme") {
+                        item(
+                            name,
+                            &[
+                                ("Model", "SAMSUNG MZQL2960HCJR"),
+                                ("Size", "894 GiB"),
+                                ("Kind", "SSD"),
+                                ("Connection", "NVME"),
+                            ],
+                        )
+                    } else {
+                        item(
+                            name,
+                            &[
+                                ("Model", "ST2000NM000B"),
+                                ("Size", "1.8 TiB"),
+                                ("Kind", "HDD (spinning)"),
+                                ("Connection", "SATA"),
+                            ],
+                        )
+                    }
+                })
+                .collect(),
+        ),
+        group(
+            "Graphics",
+            "",
+            vec![item("ASPEED Technology, Inc. ASPEED Graphics Family", &[])],
+        ),
+        group(
+            "Network adapters",
+            "",
+            vec![item(
+                "Broadcom Inc. BCM57416 NetXtreme-E Dual-Media 10G RDMA Ethernet Controller",
+                &[("Ports", "2")],
+            )],
+        ),
+        group(
+            "Network ports",
+            "",
+            vec![
+                item("eth0", &[("Link", "10 Gbit/s"), ("Driver", "bnxt_en")]),
+                item("eth1", &[("Link", "1 Gbit/s"), ("Driver", "bnxt_en")]),
+            ],
+        ),
+    ];
+    if let Some((name, _)) = p.gpu {
+        groups[4].items.push(item(&format!("NVIDIA Corporation {name}"), &[]));
+    }
+    groups
 }

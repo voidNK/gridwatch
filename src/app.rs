@@ -25,6 +25,7 @@ const RANGES: [(&str, i64); 6] = [
 ];
 /// The screenshot that is taken with the settings window open.
 const SETTINGS_SHOT: &str = "settings.png";
+const HOMEPAGE: &str = "https://github.com/voidNK/gridwatch";
 const DONATE_PAYPAL: &str = "https://paypal.me/lizo";
 const DONATE_KOFI: &str = "https://ko-fi.com/A0A05OS1A";
 const INTERVALS: [u64; 5] = [2, 5, 10, 30, 60];
@@ -37,12 +38,14 @@ enum Tab {
     Overview,
     Cpu,
     Cores,
+    Memory,
     Processes,
     Network,
     Disks,
     Temps,
     Gpu,
     Docker,
+    Hardware,
     Suggestions,
 }
 
@@ -161,12 +164,14 @@ impl App {
                 (0, Tab::Overview, "overview.png"),
                 (0, Tab::Cpu, "cpu.png"),
                 (0, Tab::Cores, "cores.png"),
+                (pick(1), Tab::Memory, "memory.png"),
                 (0, Tab::Processes, "processes.png"),
                 (0, Tab::Network, "network.png"),
                 (pick(1), Tab::Disks, "disks.png"),
                 (pick(1), Tab::Temps, "temperatures.png"),
                 (pick(2), Tab::Gpu, "gpu.png"),
                 (0, Tab::Docker, "docker.png"),
+                (pick(1), Tab::Hardware, "hardware.png"),
                 (pick(2), Tab::Suggestions, "suggestions.png"),
                 (0, Tab::Overview, SETTINGS_SHOT),
             ],
@@ -604,15 +609,6 @@ impl App {
                         self.update_open = true;
                     }
                 }
-                for (label, url, icon) in [
-                    ("PayPal", DONATE_PAYPAL, w::Icon::Wallet),
-                    ("Ko-fi", DONATE_KOFI, w::Icon::Cup),
-                ] {
-                    let hover = format!("gridwatch is free. If it helps you, a donation is welcome.\n{url}");
-                    if w::icon_button(ui, icon, label).on_hover_text(hover).clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                    }
-                }
                 let on = self.config.notifications.enabled;
                 let bell = ui
                     .selectable_label(on, if on { "🔔 Alerts on" } else { "🔕 Alerts off" })
@@ -852,11 +848,13 @@ Click to switch on or off.",
                         ),
                         (Tab::Cpu, "CPU".to_string()),
                         (Tab::Cores, format!("Cores ({})", sample.cores.len())),
+                        (Tab::Memory, "Memory".to_string()),
                         (Tab::Processes, format!("Processes ({})", sample.proc_count)),
                         (Tab::Network, "Network".to_string()),
                         (Tab::Disks, "Disks".to_string()),
                         (Tab::Temps, "Temperatures".to_string()),
                         (Tab::Docker, "Docker".to_string()),
+                        (Tab::Hardware, "Hardware".to_string()),
                         (
                             Tab::Suggestions,
                             if alerts > 0 {
@@ -886,12 +884,14 @@ Click to switch on or off.",
                         Tab::Overview => overview_tab(ui, &state, sample, range),
                         Tab::Cpu => cpu_tab(ui, &state, sample, range),
                         Tab::Cores => cores_tab(ui, &state, sample, range),
+                        Tab::Memory => memory_tab(ui, &state, sample, range),
                         Tab::Processes => processes_tab(ui, sample, filter),
                         Tab::Network => network_tab(ui, &state, sample, range),
                         Tab::Disks => disks_tab(ui, &state, sample, range),
                         Tab::Temps => temps_tab(ui, &state, sample, range),
                         Tab::Gpu => gpu_tab(ui, &state, sample, range),
                         Tab::Docker => docker_tab(ui, &state, sample, range, slots),
+                        Tab::Hardware => hardware_tab(ui, &state),
                         Tab::Suggestions => suggestions_tab(ui, &suggestions),
                     });
             }
@@ -1183,6 +1183,22 @@ Click to switch on or off.",
                         ui.label(w::muted("Demo mode: settings are not saved."));
                     }
                     ui.add_space(4.0);
+                    ui.add_space(6.0);
+                    w::section(ui, "About", concat!("gridwatch ", env!("CARGO_PKG_VERSION")));
+                    ui.label(w::muted("Free to use. If it helps you, a donation is welcome."));
+                    ui.horizontal(|ui| {
+                        for (label, url, icon) in [
+                            ("Ko-fi", DONATE_KOFI, w::Icon::Cup),
+                            ("PayPal", DONATE_PAYPAL, w::Icon::Wallet),
+                        ] {
+                            if w::icon_button(ui, icon, label).on_hover_text(url).clicked() {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                            }
+                        }
+                        if ui.button("Website").on_hover_text(HOMEPAGE).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(HOMEPAGE));
+                        }
+                    });
                     close = ui.button("Close").clicked();
                 });
             });
@@ -1677,6 +1693,230 @@ fn cores_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
                     );
                 });
             }
+        });
+    }
+}
+
+fn memory_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
+    let total = s.mem_total.max(1);
+    let used_pct = s.mem_used as f32 / total as f32 * 100.0;
+    let swap_pct = s.swap_used as f32 / s.swap_total.max(1) as f32 * 100.0;
+    w::tiles(
+        ui,
+        &[
+            (
+                "Used",
+                format!("{used_pct:.0}%"),
+                format!("{} of {}", fmt_bytes(s.mem_used), fmt_bytes(s.mem_total)),
+                w::level(used_pct, 90.0, 95.0),
+            ),
+            (
+                "Available",
+                fmt_bytes(s.mem_total.saturating_sub(s.mem_used)),
+                "free, or freed on demand".into(),
+                None,
+            ),
+            (
+                "Cache",
+                fmt_bytes(s.mem_cached),
+                "files in memory, freed on demand".into(),
+                None,
+            ),
+            if s.swap_total > 0 {
+                (
+                    "Swap",
+                    format!("{swap_pct:.0}%"),
+                    format!("{} of {}", fmt_bytes(s.swap_used), fmt_bytes(s.swap_total)),
+                    w::level(swap_pct, 50.0, 90.0),
+                )
+            } else {
+                (
+                    "Swap",
+                    "none".to_string(),
+                    "this machine has no swap space".into(),
+                    None,
+                )
+            },
+        ],
+    );
+
+    w::card(ui, |ui| {
+        w::section(
+            ui,
+            "Where the memory is",
+            &format!("{} installed", fmt_bytes(s.mem_total)),
+        );
+        w::stacked_bar(
+            ui,
+            &[
+                ("Used by programs", s.mem_used as f64, w::SERIES[0]),
+                ("Cache", s.mem_cached as f64, w::SERIES[2]),
+                ("Free", s.mem_free as f64, w::AXIS),
+            ],
+            |bytes| fmt_bytes(bytes as u64),
+        );
+    });
+
+    ui.columns(2, |cols| {
+        w::card(&mut cols[0], |ui| {
+            w::section(ui, "Memory over time", "");
+            let series = vec![
+                Series::new("Used by programs", 0, points(state, |p| p.mem_used as f64 / GIB)),
+                Series::new("Cache", 2, points(state, |p| p.mem_cached as f64 / GIB)),
+            ];
+            let mut opt = ChartOptions::new(200.0, w::fmt_gib);
+            opt.y_max = Some(s.mem_total as f64 / GIB);
+            w::chart(ui, "mem-time", range, series, opt);
+        });
+        w::card(&mut cols[1], |ui| {
+            w::section(
+                ui,
+                "Swap used",
+                &if s.swap_total > 0 {
+                    format!("of {}", fmt_bytes(s.swap_total))
+                } else {
+                    String::new()
+                },
+            );
+            if s.swap_total == 0 {
+                ui.add_space(86.0);
+                ui.vertical_centered(|ui| ui.label(w::muted("This machine has no swap space.")));
+                ui.add_space(106.0);
+                return;
+            }
+            let series = vec![Series::new("Swap", 1, points(state, |p| p.swap_used as f64 / GIB))];
+            let mut opt = ChartOptions::new(200.0, w::fmt_gib);
+            opt.y_max = Some(s.swap_total as f64 / GIB);
+            opt.fill = true;
+            w::chart(ui, "mem-swap", range, series, opt);
+        });
+    });
+
+    let largest = s.procs.iter().map(|p| p.rss).max().unwrap_or(1).max(1);
+    let mut procs: Vec<&Proc> = s.procs.iter().filter(|p| p.rss > 0).collect();
+    procs.sort_by_key(|p| std::cmp::Reverse(p.rss));
+    procs.truncate(15);
+    w::card(ui, |ui| {
+        w::section(ui, "Largest processes", "by memory they hold");
+        if let Some((column, descending)) = w::sort_choice(ui, "mem-procs") {
+            procs.sort_by(|a, b| {
+                let order = match column {
+                    0 => a.pid.cmp(&b.pid),
+                    1 => a.user.cmp(&b.user),
+                    2 | 3 => a.rss.cmp(&b.rss),
+                    4 => a.mem_pct.total_cmp(&b.mem_pct),
+                    _ => a.cmd.cmp(&b.cmd),
+                };
+                w::directed(order, descending)
+            });
+        }
+        let heads = ["PID", "User", "Memory", "", "Share", "Command"];
+        w::table(ui, "mem-procs", &heads, &[1, 5], procs.len(), |i, c| {
+            let p = procs[i];
+            c.text(RichText::new(p.pid.to_string()).monospace());
+            c.text(p.user.as_str());
+            c.text(fmt_bytes(p.rss));
+            c.cell(|ui| w::bar(ui, p.rss as f32 / largest as f32, 140.0, w::SERIES[0]));
+            c.text(format!("{:.1}%", p.mem_pct));
+            c.cell(|ui| {
+                ui.label(RichText::new(&p.cmd).monospace()).on_hover_text(&p.cmd);
+            });
+        });
+    });
+
+    if !s.mem_detail.is_empty() {
+        w::card(ui, |ui| {
+            w::section(ui, "Details", "as the operating system counts it; the entries overlap");
+            let mut rows: Vec<&(String, u64)> = s.mem_detail.iter().collect();
+            if let Some((column, descending)) = w::sort_choice(ui, "mem-detail") {
+                rows.sort_by(|a, b| w::directed(if column == 0 { a.0.cmp(&b.0) } else { a.1.cmp(&b.1) }, descending));
+            }
+            w::table(
+                ui,
+                "mem-detail",
+                &["Kind", "Size", "", "Of all memory"],
+                &[0],
+                rows.len(),
+                |i, c| {
+                    let (kind, bytes) = rows[i];
+                    c.text(kind.as_str());
+                    c.text(fmt_bytes(*bytes));
+                    c.cell(|ui| w::bar(ui, *bytes as f32 / total as f32, 200.0, w::SERIES[0]));
+                    c.text(format!("{:.1}%", *bytes as f64 / total as f64 * 100.0));
+                },
+            );
+        });
+    }
+}
+
+fn hardware_tab(ui: &mut Ui, state: &ServerState) {
+    let Some(hardware) = &state.hardware else {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(w::muted("Reading what is built into this machine…"));
+        });
+        return;
+    };
+    if hardware.is_empty() {
+        w::card(ui, |ui| {
+            ui.label(RichText::new("This machine does not tell what it is made of").strong());
+            ui.label(w::muted(
+                "None of the usual tools (lscpu, lsblk, lspci, system_profiler) answered.",
+            ));
+        });
+    }
+    for group in hardware {
+        w::card(ui, |ui| {
+            w::section(ui, &group.title, &group.note);
+            // A single thing is a list of facts; several of a kind are a table.
+            if let [item] = group.items.as_slice() {
+                if !item.name.is_empty() {
+                    ui.label(RichText::new(&item.name).strong());
+                }
+                egui::Grid::new(("hardware", &group.title))
+                    .num_columns(2)
+                    .spacing([28.0, 6.0])
+                    .show(ui, |ui| {
+                        for (key, value) in &item.props {
+                            ui.label(w::muted(key));
+                            ui.label(value);
+                            ui.end_row();
+                        }
+                    });
+                return;
+            }
+            let mut keys: Vec<&str> = Vec::new();
+            for (key, _) in group.items.iter().flat_map(|item| &item.props) {
+                if !keys.contains(&key.as_str()) {
+                    keys.push(key);
+                }
+            }
+            let value = |item: &crate::hardware::HwItem, column: usize| -> String {
+                match column {
+                    0 => item.name.clone(),
+                    n => item
+                        .props
+                        .iter()
+                        .find(|(k, _)| k == keys[n - 1])
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default(),
+                }
+            };
+            let mut heads = vec!["Name"];
+            heads.extend(&keys);
+            let id = format!("hardware-{}", group.title);
+            let mut rows: Vec<&crate::hardware::HwItem> = group.items.iter().collect();
+            if let Some((column, descending)) = w::sort_choice(ui, &id) {
+                rows.sort_by(|a, b| w::directed(value(a, column).cmp(&value(b, column)), descending));
+            }
+            let text: Vec<usize> = (0..heads.len()).collect();
+            w::table(ui, &id, &heads, &text, rows.len(), |i, c| {
+                c.text(RichText::new(&rows[i].name).strong());
+                for column in 1..heads.len() {
+                    let text = value(rows[i], column);
+                    c.text(if text.is_empty() { "–".to_string() } else { text });
+                }
+            });
         });
     }
 }

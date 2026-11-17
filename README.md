@@ -17,12 +17,14 @@ reads `/proc` (or `sysctl` and `vm_stat` on a Mac), `df`, `ps` and the docker CL
   - **Overview** - CPU, memory, load, network, disks and containers at a glance
   - **CPU** - time split into user / system / I/O wait / steal, load average, temperature
   - **Cores** - one chart per core, plus clock frequency
+  - **Memory** - programs, cache and free over time, swap, the largest processes
   - **Processes** - live CPU per process (measured between two polls, not the lifetime average `ps` prints), filter and sort
   - **Network** - received and sent traffic per interface, with totals since the interface came up
   - **Disks** - read and write transfer per disk, operations per second, share of time busy, filesystems
   - **Temperatures** - every sensor: CPU, GPU, NVMe and SATA disks, mainboard
   - **GPU** - load, memory, temperature and power (only on machines that have one)
   - **Docker** - state, CPU, memory, limits and network I/O of every container, with charts for the heaviest ones
+  - **Hardware** - what is built into the machine: mainboard, processor, memory modules, disks, graphics, network adapters
   - **Suggestions** - plain-language findings with a concrete next step
 - **History saved locally** in SQLite. Charts cover 5 minutes to 7 days and survive a restart;
   data older than 14 days is pruned.
@@ -47,6 +49,10 @@ reads `/proc` (or `sysctl` and `vm_stat` on a Mac), `df`, `ps` and the docker CL
 | GPU | Docker |
 | --- | --- |
 | ![GPU](docs/screenshots/gpu.png) | ![Docker](docs/screenshots/docker.png) |
+
+| Memory | Hardware |
+| --- | --- |
+| ![Memory](docs/screenshots/memory.png) | ![Hardware](docs/screenshots/hardware.png) |
 
 ![Suggestions](docs/screenshots/suggestions.png)
 
@@ -155,6 +161,7 @@ The remote user needs no special rights. To see containers it must be allowed to
 | Temperatures | `hwmon` and thermal zones; SATA disks need `sudo modprobe drivetemp` | needs `macmon` (`brew install macmon`) | no |
 | GPU | `nvidia-smi`, `amdgpu` | `macmon` | `nvidia-smi` |
 | Docker | `docker` CLI | `docker` in `/usr/local/bin` or `/opt/homebrew/bin` | `docker` CLI (Docker Desktop) |
+| Hardware | `lscpu`, `lsblk`, `lspci`, `/sys`; memory modules need passwordless `sudo dmidecode` | `system_profiler` | PowerShell (CIM) |
 
 A Mac needs Remote Login enabled (System Settings > General > Sharing). A POSIX `sh` is all that
 is required of the login shell.
@@ -203,6 +210,7 @@ cargo test real_release -- --ignored --nocapture                              # 
 | --- | --- |
 | `src/ssh.rs` | connection, host key check, authentication (russh) |
 | `src/parse.rs` | the collection scripts and the parsers for their output |
+| `src/hardware.rs` | the hardware inventory: scripts and parsers |
 | `src/collector.rs` | one polling task per server: SSH, local shell, WSL |
 | `src/local_windows.rs` | this computer on Windows, through the Windows API |
 | `src/store.rs` | SQLite history and the config file |

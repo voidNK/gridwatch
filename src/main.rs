@@ -5,6 +5,7 @@
 mod app;
 mod collector;
 mod demo;
+mod hardware;
 #[cfg(windows)]
 mod local_windows;
 mod model;

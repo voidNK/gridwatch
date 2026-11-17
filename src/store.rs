@@ -139,7 +139,7 @@ CREATE TABLE IF NOT EXISTS samples (
     load1 REAL, load5 REAL, load15 REAL,
     mem_used INTEGER, mem_total INTEGER, swap_used INTEGER,
     rx_bps REAL, tx_bps REAL, temp REAL, cores TEXT,
-    disk_read REAL, disk_write REAL, disk_util REAL, temps TEXT, gpus TEXT, nets TEXT,
+    disk_read REAL, disk_write REAL, disk_util REAL, temps TEXT, gpus TEXT, nets TEXT, mem_cached INTEGER,
     PRIMARY KEY (server_id, ts)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS container_samples (
@@ -150,13 +150,14 @@ CREATE TABLE IF NOT EXISTS container_samples (
 ";
 
 /// Columns added after the first release; databases created before get them on open.
-const ADDED_COLUMNS: [&str; 6] = [
+const ADDED_COLUMNS: [&str; 7] = [
     "disk_read REAL",
     "disk_write REAL",
     "disk_util REAL",
     "temps TEXT",
     "gpus TEXT",
     "nets TEXT",
+    "mem_cached INTEGER",
 ];
 
 /// Number of points a chart gets at most; older data is averaged into buckets.
@@ -194,7 +195,7 @@ impl Store {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT OR REPLACE INTO samples VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+            "INSERT OR REPLACE INTO samples VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
             params![
                 server_id,
                 p.ts,
@@ -219,6 +220,7 @@ impl Store {
                 serde_json::to_string(&p.temps)?,
                 serde_json::to_string(&p.gpus)?,
                 serde_json::to_string(&p.nets)?,
+                p.mem_cached as i64,
             ],
         )?;
         if let DockerState::Ok(list) = docker {
@@ -240,7 +242,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT ts, cpu, cpu_user, cpu_system, cpu_iowait, cpu_steal, load1, load5, load15,
                     mem_used, mem_total, swap_used, rx_bps, tx_bps, temp, cores,
-                    disk_read, disk_write, disk_util, temps, gpus, nets
+                    disk_read, disk_write, disk_util, temps, gpus, nets, mem_cached
              FROM samples WHERE server_id = ?1 AND ts >= ?2 ORDER BY ts",
         )?;
         let rows = stmt.query_map(params![server_id, since], |r| {
@@ -269,6 +271,7 @@ impl Store {
                 temps: json(r.get(19)?),
                 gpus: json(r.get(20)?),
                 nets: json(r.get(21)?),
+                mem_cached: r.get::<_, Option<i64>>(22)?.unwrap_or(0) as u64,
             })
         })?;
 
@@ -390,6 +393,7 @@ fn average(group: &[HistPoint]) -> HistPoint {
         },
         load: [mean(&|p| p.load[0]), mean(&|p| p.load[1]), mean(&|p| p.load[2])],
         mem_used: mean64(&|p| p.mem_used as f64) as u64,
+        mem_cached: mean64(&|p| p.mem_cached as f64) as u64,
         mem_total: last.mem_total,
         swap_used: mean64(&|p| p.swap_used as f64) as u64,
         rx_bps: mean64(&|p| p.rx_bps),

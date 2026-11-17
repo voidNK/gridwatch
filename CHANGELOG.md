@@ -4,6 +4,15 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.7.0
+
+- The Ko-fi and PayPal buttons moved out of the top bar into a new About section in the settings.
+- **Memory tab**: how the memory splits into programs, cache and free, both over time; swap;
+  the largest processes; and the finer breakdown the operating system reports.
+- **Hardware tab**: what is built into the machine - system and mainboard, processor, memory
+  modules, disks, graphics, storage controllers, network adapters and ports. Read once after
+  connecting. Memory modules on Linux need `sudo dmidecode` to work without a password.
+
 ## 0.6.0
 
 - **Updates**: gridwatch asks GitHub at start whether a newer version exists and shows an

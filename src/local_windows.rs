@@ -247,6 +247,10 @@ impl Local {
             load: [0.0; 3],
             mem_total,
             mem_used: self.sys.used_memory(),
+            // Windows counts its file cache (standby list) as available but not as free.
+            mem_cached: self.sys.available_memory().saturating_sub(self.sys.free_memory()),
+            mem_free: self.sys.free_memory().min(self.sys.available_memory()),
+            mem_detail: Vec::new(),
             swap_total: self.sys.total_swap(),
             swap_used: self.sys.used_swap(),
             rx_bps,

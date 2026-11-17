@@ -5,7 +5,7 @@ use crate::notify::Notifier;
 use crate::parse::{self, RawSystem};
 use crate::ssh::{ConnectError, Session};
 use crate::store::Store;
-use crate::{demo, now_ts};
+use crate::{demo, hardware, now_ts};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -181,6 +181,15 @@ async fn local_loop(cfg: &ServerConfig, shared: &Shared, env: &Env) -> Result<()
     use crate::local_windows::Local;
     use std::sync::Mutex;
     let local = Arc::new(Mutex::new(Local::new()?));
+    // The inventory takes PowerShell a few seconds; it must not hold up the first numbers.
+    let (inventory, repaint) = (shared.clone(), env.repaint.clone());
+    tokio::task::spawn_blocking(move || {
+        let args = ["-NoProfile", "-NonInteractive", "-Command", "-"];
+        if let Ok(out) = run_local("powershell", &args, hardware::WINDOWS_SCRIPT) {
+            inventory.lock().unwrap().hardware = Some(hardware::parse(&out));
+            repaint.request_repaint();
+        }
+    });
     // CPU usage is measured between two readings.
     tokio::time::sleep(Duration::from_secs(1)).await;
     loop {
@@ -212,6 +221,7 @@ async fn poll_loop(source: &Source, cfg: &ServerConfig, shared: &Shared, env: &E
     // CPU and network values are rates, so a first baseline poll is needed.
     let (mut prev, mut prev_at) = poll_system(source).await?;
     tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut inventory_read = false;
     loop {
         let started = Instant::now();
         let (system, docker) = tokio::join!(poll_system(source), poll_docker(source));
@@ -221,6 +231,14 @@ async fn poll_loop(source: &Source, cfg: &ServerConfig, shared: &Shared, env: &E
         env.publish(&cfg.id, shared, sample, docker);
         env.alert(cfg, shared);
         (prev, prev_at) = (raw, at);
+        // The inventory does not change; read it once, after the first numbers are on screen.
+        if !inventory_read {
+            inventory_read = true;
+            if let Ok(out) = source.run(&hardware::script(), Duration::from_secs(60)).await {
+                shared.lock().unwrap().hardware = Some(hardware::parse(&out));
+                env.repaint.request_repaint();
+            }
+        }
         tokio::time::sleep(env.interval().saturating_sub(started.elapsed())).await;
     }
 }
@@ -233,6 +251,7 @@ pub fn spawn_demo(
     shared: Shared,
     env: Arc<Env>,
 ) -> JoinHandle<()> {
+    shared.lock().unwrap().hardware = Some(demo::hardware(profile));
     let step = env.interval().as_secs() as i64;
     let now = now_ts();
     let mut ts = now - 3600;

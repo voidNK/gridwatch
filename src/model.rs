@@ -295,7 +295,14 @@ pub struct Sample {
     pub freqs: Vec<f32>,
     pub load: [f32; 3],
     pub mem_total: u64,
+    /// Held by programs and the kernel; what is left is available.
     pub mem_used: u64,
+    /// File cache and buffers: in use, but given back as soon as programs need it.
+    pub mem_cached: u64,
+    /// Not used for anything.
+    pub mem_free: u64,
+    /// Finer breakdown as the operating system reports it; the entries overlap.
+    pub mem_detail: Vec<(String, u64)>,
     pub swap_total: u64,
     pub swap_used: u64,
     pub rx_bps: f64,
@@ -321,6 +328,7 @@ pub struct HistPoint {
     pub cpu: CpuUsage,
     pub load: [f32; 3],
     pub mem_used: u64,
+    pub mem_cached: u64,
     pub mem_total: u64,
     pub swap_used: u64,
     pub rx_bps: f64,
@@ -349,6 +357,7 @@ impl HistPoint {
             mem_used: s.mem_used,
             mem_total: s.mem_total,
             swap_used: s.swap_used,
+            mem_cached: s.mem_cached,
             rx_bps: s.rx_bps,
             tx_bps: s.tx_bps,
             temp: s.temp,
@@ -390,6 +399,8 @@ pub struct ServerState {
     pub docker: DockerState,
     pub history: VecDeque<HistPoint>,
     pub container_history: HashMap<String, VecDeque<ContainerPoint>>,
+    /// What is built into the machine; read once after connecting.
+    pub hardware: Option<crate::hardware::Hardware>,
 }
 
 impl ServerState {

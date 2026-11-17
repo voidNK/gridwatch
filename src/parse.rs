@@ -311,6 +311,9 @@ pub struct RawSystem {
     load: [f32; 3],
     mem_total: u64,
     mem_used: u64,
+    mem_cached: u64,
+    mem_free: u64,
+    mem_detail: Vec<(String, u64)>,
     swap_total: u64,
     swap_used: u64,
     uptime: u64,
@@ -380,6 +383,22 @@ pub fn parse_system(text: &str) -> Result<RawSystem> {
         m("MemFree") + m("Buffers") + m("Cached")
     };
     raw.mem_used = raw.mem_total.saturating_sub(available);
+    raw.mem_free = m("MemFree").min(available);
+    raw.mem_cached = available - raw.mem_free;
+    for (label, key) in [
+        ("Page cache", "Cached"),
+        ("Buffers", "Buffers"),
+        ("Kernel caches, reclaimable", "SReclaimable"),
+        ("Kernel, not reclaimable", "SUnreclaim"),
+        ("Shared memory and tmpfs", "Shmem"),
+        ("Program data (anonymous)", "AnonPages"),
+        ("Page tables", "PageTables"),
+        ("Waiting to be written to disk", "Dirty"),
+    ] {
+        if mem.contains_key(key) {
+            raw.mem_detail.push((label.to_string(), m(key)));
+        }
+    }
     raw.swap_total = m("SwapTotal");
     raw.swap_used = raw.swap_total.saturating_sub(m("SwapFree"));
 
@@ -630,6 +649,22 @@ fn parse_mac(sec: &HashMap<&str, Vec<&str>>) -> Result<RawSystem> {
         + page("Pages wired down")
         + page("Pages occupied by compressor");
     raw.mem_used = (used * number("pagesize")).min(raw.mem_total);
+    let bytes = |pages: u64| pages * number("pagesize");
+    raw.mem_free = bytes(page("Pages free") + page("Pages speculative")).min(raw.mem_total - raw.mem_used);
+    raw.mem_cached = raw.mem_total - raw.mem_used - raw.mem_free;
+    raw.mem_detail = vec![
+        (
+            "App memory".to_string(),
+            bytes(page("Anonymous pages").saturating_sub(page("Pages purgeable"))),
+        ),
+        (
+            "Wired (kernel, cannot be moved)".to_string(),
+            bytes(page("Pages wired down")),
+        ),
+        ("Compressed".to_string(), bytes(page("Pages occupied by compressor"))),
+        ("Cached files".to_string(), bytes(page("File-backed pages"))),
+        ("Purgeable".to_string(), bytes(page("Pages purgeable"))),
+    ];
 
     // "total = 2048.00M  used = 1024.50M  free = 1023.50M  (encrypted)"
     let swap = sysctl.get("swap").copied().unwrap_or("");
@@ -853,6 +888,9 @@ pub fn build_sample(prev: &RawSystem, cur: &RawSystem, dt: f64, ts: i64) -> Samp
         load: cur.load,
         mem_total: cur.mem_total,
         mem_used: cur.mem_used,
+        mem_cached: cur.mem_cached,
+        mem_free: cur.mem_free,
+        mem_detail: cur.mem_detail.clone(),
         swap_total: cur.swap_total,
         swap_used: cur.swap_used,
         rx_bps: rate(cur.net_rx, prev.net_rx),
@@ -1003,6 +1041,8 @@ mod tests {
         assert_eq!(s.load, [0.52, 0.40, 0.30]);
         assert_eq!(s.mem_total, 8_000_000 * 1024);
         assert_eq!(s.mem_used, 2_000_000 * 1024);
+        assert_eq!((s.mem_cached, s.mem_free), (5_000_000 * 1024, 1_000_000 * 1024));
+        assert!(s.mem_detail.is_empty()); // this fixture has only the totals
         assert_eq!(s.swap_used, 500_000 * 1024);
         assert_eq!(s.uptime, 86400);
         assert_eq!(s.rx_bps, 1000.0); // lo and veth are ignored
@@ -1212,6 +1252,12 @@ mod tests {
         assert_eq!(s.mem_total, 16 << 30);
         // (220000 - 20000 + 100000 + 50000) pages of 16 KiB
         assert_eq!(s.mem_used, 350_000 * 16384);
+        assert_eq!(s.mem_free, 1000 * 16384);
+        assert_eq!(s.mem_used + s.mem_cached + s.mem_free, s.mem_total);
+        assert_eq!(
+            s.mem_detail[1],
+            ("Wired (kernel, cannot be moved)".to_string(), 100_000 * 16384)
+        );
         assert_eq!(s.swap_total, 2048 << 20);
         assert_eq!(s.swap_used, 512 << 20);
         assert_eq!(s.uptime, 86400);

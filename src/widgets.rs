@@ -212,6 +212,35 @@ pub fn status(ui: &mut Ui, color: Color32, label: &str) {
     });
 }
 
+/// One bar split into parts that add up to a whole, with a legend below it.
+pub fn stacked_bar(ui: &mut Ui, parts: &[(&str, f64, Color32)], format: impl Fn(f64) -> String) {
+    let total: f64 = parts.iter().map(|p| p.1).sum::<f64>().max(1.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
+    let mut left = rect.left();
+    for (_, value, color) in parts {
+        let width = rect.width() * (*value / total) as f32;
+        // A gap in the surface colour keeps neighbouring parts apart.
+        if width > 2.0 {
+            let part = egui::Rect::from_min_max(
+                egui::pos2(left, rect.top()),
+                egui::pos2(left + width - 2.0, rect.bottom()),
+            );
+            ui.painter().rect_filled(part, CornerRadius::same(3), *color);
+        }
+        left += width;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for (label, value, color) in parts {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let (swatch, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+            ui.painter().rect_filled(swatch, CornerRadius::same(2), *color);
+            ui.label(RichText::new(*label).color(TEXT_SECONDARY));
+            ui.label(format!("{} ({:.0}%)", format(*value), value / total * 100.0));
+            ui.add_space(14.0);
+        }
+    });
+}
+
 /// Headline number with a label and a line of context.
 pub fn tile(ui: &mut Ui, label: &str, value: &str, sub: &str, state: Level) {
     card(ui, |ui| {
