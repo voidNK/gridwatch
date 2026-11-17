@@ -252,6 +252,16 @@ fn play(severity: Severity, volume: f32) -> Result<(), String> {
 /// Desktop notification: toast on Windows, Notification Center on macOS, D-Bus on Linux.
 /// Always silent, the sound is ours and has its own switch.
 fn show(summary: &str, body: &str, critical: bool) -> Result<(), String> {
+    // macOS shows notifications in the name of an installed application. Left alone, the
+    // library looks one up by a name that does not exist, and macOS answers with a
+    // "Choose Application" dialog. Naming Finder up front avoids the lookup.
+    #[cfg(target_os = "macos")]
+    {
+        static APPLICATION: std::sync::Once = std::sync::Once::new();
+        APPLICATION.call_once(|| {
+            let _ = notify_rust::set_application("com.apple.Finder");
+        });
+    }
     let mut n = notify_rust::Notification::new();
     n.appname("gridwatch").summary(summary).body(body);
     #[cfg(all(unix, not(target_os = "macos")))]

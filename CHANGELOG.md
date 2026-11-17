@@ -4,6 +4,11 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.5.1
+
+- Fixed: on macOS a "Choose Application" dialog appeared with the first alert, typically right
+  after adding a server.
+
 ## 0.5.0
 
 - **Resizable columns**: drag the border between two column titles to make a column wider or
