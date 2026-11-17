@@ -263,6 +263,8 @@ pub enum Icon {
     Cup,
     /// A wallet, for PayPal.
     Wallet,
+    /// The cat in a circle, for the repository on GitHub.
+    Github,
 }
 
 /// Paint `icon` around `c`; `scale` 1 fits a line of text.
@@ -279,6 +281,21 @@ fn paint_icon(painter: &egui::Painter, icon: Icon, c: egui::Pos2, scale: f32) {
             };
             painter.rect_filled(egui::Rect::from_min_max(at(-6.0, -4.0), at(3.0, 5.0)), corners, TEXT);
             painter.circle_filled(at(-1.5, 0.0), 2.0 * scale, CRITICAL);
+        }
+        Icon::Github => {
+            painter.circle_filled(c, 7.0 * scale, TEXT);
+            // The cat is cut out of the disc in the colour of the surface.
+            painter.circle_filled(at(0.0, -0.8), 3.7 * scale, SURFACE);
+            for side in [-1.0, 1.0] {
+                let ear = vec![at(3.5 * side, -2.4), at(3.1 * side, -5.3), at(0.9 * side, -4.0)];
+                painter.add(egui::Shape::convex_polygon(ear, SURFACE, egui::Stroke::NONE));
+            }
+            painter.rect_filled(
+                egui::Rect::from_min_max(at(-1.7, 2.0), at(1.7, 6.6)),
+                CornerRadius::ZERO,
+                SURFACE,
+            );
+            painter.line_segment([at(-1.7, 4.4), at(-4.0, 3.3)], egui::Stroke::new(1.1 * scale, SURFACE));
         }
         Icon::Wallet => {
             painter.rect_filled(

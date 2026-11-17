@@ -1208,6 +1208,7 @@ Click to switch on or off.",
                             for (title, subtitle, url, icon) in [
                                 ("Ko-fi", "buy me a coffee", DONATE_KOFI, w::Icon::Cup),
                                 ("PayPal", "paypal.me/lizo", DONATE_PAYPAL, w::Icon::Wallet),
+                                ("GitHub", "website, source code and releases", HOMEPAGE, w::Icon::Github),
                             ] {
                                 if w::big_icon_button(ui, icon, title, subtitle)
                                     .on_hover_text(url)
@@ -1215,9 +1216,6 @@ Click to switch on or off.",
                                 {
                                     ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                                 }
-                            }
-                            if ui.button("Website").on_hover_text(HOMEPAGE).clicked() {
-                                ui.ctx().open_url(egui::OpenUrl::new_tab(HOMEPAGE));
                             }
                         });
                     });
