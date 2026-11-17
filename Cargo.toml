@@ -1,6 +1,6 @@
 [package]
 name = "gridwatch"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 license-file = "LICENSE"
 description = "Desktop dashboard that watches Linux and macOS machines over SSH"

@@ -265,34 +265,55 @@ pub enum Icon {
     Wallet,
 }
 
-/// A button with a picture in front of its label.
-pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> egui::Response {
-    // The blanks reserve the place where the picture is painted.
-    let response = ui.button(format!("      {label}"));
-    let c = egui::pos2(response.rect.left() + 15.0, response.rect.center().y);
-    let painter = ui.painter();
+/// Paint `icon` around `c`; `scale` 1 fits a line of text.
+fn paint_icon(painter: &egui::Painter, icon: Icon, c: egui::Pos2, scale: f32) {
+    let at = |x: f32, y: f32| egui::pos2(c.x + x * scale, c.y + y * scale);
+    let radius = |r: f32| CornerRadius::same((r * scale).round() as u8);
     match icon {
         Icon::Cup => {
-            let body = egui::Rect::from_min_max(egui::pos2(c.x - 6.0, c.y - 4.0), egui::pos2(c.x + 3.0, c.y + 5.0));
-            painter.circle_stroke(egui::pos2(c.x + 4.0, c.y - 0.5), 2.6, egui::Stroke::new(1.5, TEXT));
+            painter.circle_stroke(at(4.0, -0.5), 2.6 * scale, egui::Stroke::new(1.5 * scale, TEXT));
             let corners = CornerRadius {
-                nw: 1,
-                ne: 1,
-                sw: 4,
-                se: 4,
+                sw: (4.0 * scale) as u8,
+                se: (4.0 * scale) as u8,
+                ..radius(1.0)
             };
-            painter.rect_filled(body, corners, TEXT);
-            painter.circle_filled(egui::pos2(c.x - 1.5, c.y), 2.0, CRITICAL);
+            painter.rect_filled(egui::Rect::from_min_max(at(-6.0, -4.0), at(3.0, 5.0)), corners, TEXT);
+            painter.circle_filled(at(-1.5, 0.0), 2.0 * scale, CRITICAL);
         }
         Icon::Wallet => {
-            let body = egui::Rect::from_center_size(c, Vec2::new(14.0, 10.0));
-            painter.rect_filled(body, CornerRadius::same(2), SERIES[0]);
-            let flap = egui::Rect::from_min_max(egui::pos2(c.x + 1.0, c.y - 2.0), egui::pos2(c.x + 7.0, c.y + 2.0));
-            painter.rect_filled(flap, CornerRadius::same(1), TEXT);
-            painter.circle_filled(egui::pos2(c.x + 3.5, c.y), 1.0, SERIES[0]);
+            painter.rect_filled(
+                egui::Rect::from_min_max(at(-7.0, -5.0), at(7.0, 5.0)),
+                radius(2.0),
+                SERIES[0],
+            );
+            painter.rect_filled(egui::Rect::from_min_max(at(1.0, -2.0), at(7.0, 2.0)), radius(1.0), TEXT);
+            painter.circle_filled(at(3.5, 0.0), scale, SERIES[0]);
         }
     }
-    response
+}
+
+/// A wide button with a large picture, a title and a line below it.
+pub fn big_icon_button(ui: &mut Ui, icon: Icon, title: &str, subtitle: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 76.0), Sense::click());
+    let fill = if response.hovered() { AXIS } else { GRID };
+    ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+    paint_icon(ui.painter(), icon, egui::pos2(rect.left() + 42.0, rect.center().y), 3.2);
+    let text = egui::pos2(rect.left() + 84.0, rect.center().y);
+    ui.painter().text(
+        egui::pos2(text.x, text.y - 9.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(18.0),
+        TEXT,
+    );
+    ui.painter().text(
+        egui::pos2(text.x, text.y + 13.0),
+        egui::Align2::LEFT_CENTER,
+        subtitle,
+        egui::FontId::proportional(12.5),
+        MUTED,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A coloured state with its label, e.g. red and "critical".

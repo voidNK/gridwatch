@@ -1018,188 +1018,209 @@ Click to switch on or off.",
             .resizable(true)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
-            .default_size([640.0, 620.0])
+            .default_size([940.0, 560.0])
             .show(ctx, |ui| {
                 // Scrolls when the window is made smaller than its content.
                 ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 8.0;
-                    let n = &mut self.config.notifications;
-                    w::section(ui, "Notifications", "when a server gets into trouble");
-                    ui.checkbox(&mut n.enabled, "Alerts enabled")
-                        .on_hover_text("Same switch as the bell in the top bar.");
-                    ui.add_enabled_ui(n.enabled, |ui| {
-                        egui::Grid::new("notify-form")
-                            .num_columns(2)
-                            .spacing([16.0, 8.0])
-                            .show(ui, |ui| {
-                                ui.checkbox(&mut n.sound, "Play a sound");
-                                ui.add_enabled_ui(n.sound, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let mut pct = n.volume * 100.0;
-                                        ui.add(
-                                            egui::Slider::new(&mut pct, 5.0..=100.0)
-                                                .fixed_decimals(0)
-                                                .suffix("%")
-                                                .text("volume"),
-                                        );
-                                        n.volume = pct / 100.0;
+                    // Settings take two thirds of the width, the about column the rest.
+                    let width = ui.available_width().max(780.0);
+                    let column = |share: f32| egui::vec2(width * share - 14.0, 0.0);
+                    ui.horizontal_top(|ui| {
+                        ui.allocate_ui_with_layout(column(2.0 / 3.0), Layout::top_down(Align::Min), |ui| {
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            let n = &mut self.config.notifications;
+                            w::section(ui, "Notifications", "when a server gets into trouble");
+                            ui.checkbox(&mut n.enabled, "Alerts enabled")
+                                .on_hover_text("Same switch as the bell in the top bar.");
+                            ui.add_enabled_ui(n.enabled, |ui| {
+                                egui::Grid::new("notify-form")
+                                    .num_columns(2)
+                                    .spacing([16.0, 8.0])
+                                    .show(ui, |ui| {
+                                        ui.checkbox(&mut n.sound, "Play a sound");
+                                        ui.add_enabled_ui(n.sound, |ui| {
+                                            ui.horizontal(|ui| {
+                                                let mut pct = n.volume * 100.0;
+                                                ui.add(
+                                                    egui::Slider::new(&mut pct, 5.0..=100.0)
+                                                        .fixed_decimals(0)
+                                                        .suffix("%")
+                                                        .text("volume"),
+                                                );
+                                                n.volume = pct / 100.0;
+                                            });
+                                        });
+                                        ui.end_row();
+                                        ui.checkbox(&mut n.desktop, "Show a desktop notification");
+                                        ui.label(w::muted("Windows toast, macOS Notification Center, Linux desktop"));
+                                        ui.end_row();
+                                        ui.label("Alert on");
+                                        ui.horizontal(|ui| {
+                                            ui.selectable_value(&mut n.critical_only, false, "Warnings and critical");
+                                            ui.selectable_value(&mut n.critical_only, true, "Critical only");
+                                        });
+                                        ui.end_row();
+                                        ui.checkbox(&mut n.offline, "Server unreachable");
+                                        ui.label(w::muted("alert when the SSH connection is lost or fails"));
+                                        ui.end_row();
+                                        ui.label("Remind me");
+                                        let text = |m: u32| {
+                                            if m == 0 {
+                                                "never".to_string()
+                                            } else {
+                                                format!("every {m} min")
+                                            }
+                                        };
+                                        ui.horizontal(|ui| {
+                                            egui::ComboBox::from_id_salt("repeat")
+                                                .width(110.0)
+                                                .selected_text(text(n.repeat_minutes))
+                                                .show_ui(ui, |ui| {
+                                                    for m in REPEAT_MINUTES {
+                                                        ui.selectable_value(&mut n.repeat_minutes, m, text(m));
+                                                    }
+                                                });
+                                            ui.label(w::muted("while problems stay open"));
+                                        });
+                                        ui.end_row();
                                     });
-                                });
-                                ui.end_row();
-                                ui.checkbox(&mut n.desktop, "Show a desktop notification");
-                                ui.label(w::muted("Windows toast, macOS Notification Center, Linux desktop"));
-                                ui.end_row();
-                                ui.label("Alert on");
-                                ui.horizontal(|ui| {
-                                    ui.selectable_value(&mut n.critical_only, false, "Warnings and critical");
-                                    ui.selectable_value(&mut n.critical_only, true, "Critical only");
-                                });
-                                ui.end_row();
-                                ui.checkbox(&mut n.offline, "Server unreachable");
-                                ui.label(w::muted("alert when the SSH connection is lost or fails"));
-                                ui.end_row();
-                                ui.label("Remind me");
-                                let text = |m: u32| {
-                                    if m == 0 {
-                                        "never".to_string()
-                                    } else {
-                                        format!("every {m} min")
-                                    }
-                                };
-                                ui.horizontal(|ui| {
-                                    egui::ComboBox::from_id_salt("repeat")
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.button("Test warning").clicked() {
+                                    test = Some(Severity::Warning);
+                                }
+                                if ui.button("Test critical").clicked() {
+                                    test = Some(Severity::Critical);
+                                }
+                                ui.label(w::muted("A problem is announced once, and again if it gets worse."));
+                            });
+
+                            ui.add_space(6.0);
+                            w::section(ui, "Data", "");
+                            egui::Grid::new("data-form")
+                                .num_columns(2)
+                                .spacing([16.0, 8.0])
+                                .show(ui, |ui| {
+                                    ui.label("Refresh every");
+                                    egui::ComboBox::from_id_salt("settings-interval")
                                         .width(110.0)
-                                        .selected_text(text(n.repeat_minutes))
+                                        .selected_text(format!("{} s", self.config.interval_secs))
                                         .show_ui(ui, |ui| {
-                                            for m in REPEAT_MINUTES {
-                                                ui.selectable_value(&mut n.repeat_minutes, m, text(m));
+                                            for v in INTERVALS {
+                                                ui.selectable_value(
+                                                    &mut self.config.interval_secs,
+                                                    v,
+                                                    format!("{v} s"),
+                                                );
                                             }
                                         });
-                                    ui.label(w::muted("while problems stay open"));
-                                });
-                                ui.end_row();
-                            });
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Test warning").clicked() {
-                            test = Some(Severity::Warning);
-                        }
-                        if ui.button("Test critical").clicked() {
-                            test = Some(Severity::Critical);
-                        }
-                        ui.label(w::muted("A problem is announced once, and again if it gets worse."));
-                    });
-
-                    ui.add_space(6.0);
-                    w::section(ui, "Data", "");
-                    egui::Grid::new("data-form")
-                        .num_columns(2)
-                        .spacing([16.0, 8.0])
-                        .show(ui, |ui| {
-                            ui.label("Refresh every");
-                            egui::ComboBox::from_id_salt("settings-interval")
-                                .width(110.0)
-                                .selected_text(format!("{} s", self.config.interval_secs))
-                                .show_ui(ui, |ui| {
-                                    for v in INTERVALS {
-                                        ui.selectable_value(&mut self.config.interval_secs, v, format!("{v} s"));
+                                    ui.end_row();
+                                    ui.label("Keep history for");
+                                    egui::ComboBox::from_id_salt("retention")
+                                        .width(110.0)
+                                        .selected_text(format!("{} days", self.config.retention_days))
+                                        .show_ui(ui, |ui| {
+                                            for v in RETENTION_DAYS {
+                                                ui.selectable_value(
+                                                    &mut self.config.retention_days,
+                                                    v,
+                                                    format!("{v} days"),
+                                                );
+                                            }
+                                        });
+                                    ui.end_row();
+                                    if let Some(paths) = &self.paths {
+                                        ui.label("Settings file");
+                                        ui.label(w::muted(paths.config.display().to_string()));
+                                        ui.end_row();
+                                        ui.label("History");
+                                        ui.label(w::muted(paths.database.display().to_string()));
+                                        ui.end_row();
                                     }
                                 });
-                            ui.end_row();
-                            ui.label("Keep history for");
-                            egui::ComboBox::from_id_salt("retention")
-                                .width(110.0)
-                                .selected_text(format!("{} days", self.config.retention_days))
-                                .show_ui(ui, |ui| {
-                                    for v in RETENTION_DAYS {
-                                        ui.selectable_value(&mut self.config.retention_days, v, format!("{v} days"));
+                            if self.paths.is_some() {
+                                ui.add_space(6.0);
+                                w::section(ui, "This computer", "");
+                                ui.checkbox(&mut self.config.show_local, "Show this computer in the server list");
+                                if cfg!(windows) {
+                                    ui.horizontal(|ui| {
+                                        ui.checkbox(&mut self.config.show_wsl, "Show its Linux (WSL)");
+                                        ui.label(w::muted("the default distribution; watching it keeps WSL running"));
+                                    });
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(
+                                        &mut self.config.remember_secrets,
+                                        "Save passwords in the system keychain",
+                                    );
+                                    ui.label(w::muted(if cfg!(windows) {
+                                        "Windows Credential Manager"
+                                    } else if cfg!(target_os = "macos") {
+                                        "macOS Keychain"
+                                    } else {
+                                        "GNOME Keyring or KWallet"
+                                    }));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut self.config.check_updates, "Look for a new version at start");
+                                    let state = self.update.lock().unwrap().clone();
+                                    if ui
+                                        .add_enabled(state != UpdateState::Checking, egui::Button::new("Check now"))
+                                        .clicked()
+                                    {
+                                        check_now = true;
+                                    }
+                                    match state {
+                                        UpdateState::Checking => {
+                                            ui.spinner();
+                                        }
+                                        UpdateState::UpToDate => {
+                                            ui.label(w::muted(concat!(
+                                                "you have the newest version, ",
+                                                env!("CARGO_PKG_VERSION")
+                                            )));
+                                        }
+                                        UpdateState::CheckFailed(message) => {
+                                            ui.label(w::muted(message));
+                                        }
+                                        UpdateState::Available(release) => {
+                                            ui.label(format!(
+                                                "{} is available, see the button in the top bar",
+                                                release.version
+                                            ));
+                                        }
+                                        _ => {}
                                     }
                                 });
-                            ui.end_row();
-                            if let Some(paths) = &self.paths {
-                                ui.label("Settings file");
-                                ui.label(w::muted(paths.config.display().to_string()));
-                                ui.end_row();
-                                ui.label("History");
-                                ui.label(w::muted(paths.database.display().to_string()));
-                                ui.end_row();
-                            }
-                        });
-                    if self.paths.is_some() {
-                        ui.add_space(6.0);
-                        w::section(ui, "This computer", "");
-                        ui.checkbox(&mut self.config.show_local, "Show this computer in the server list");
-                        if cfg!(windows) {
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.config.show_wsl, "Show its Linux (WSL)");
-                                ui.label(w::muted("the default distribution; watching it keeps WSL running"));
-                            });
-                        }
-                        ui.horizontal(|ui| {
-                            ui.checkbox(
-                                &mut self.config.remember_secrets,
-                                "Save passwords in the system keychain",
-                            );
-                            ui.label(w::muted(if cfg!(windows) {
-                                "Windows Credential Manager"
-                            } else if cfg!(target_os = "macos") {
-                                "macOS Keychain"
                             } else {
-                                "GNOME Keyring or KWallet"
-                            }));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut self.config.check_updates, "Look for a new version at start");
-                            let state = self.update.lock().unwrap().clone();
-                            if ui
-                                .add_enabled(state != UpdateState::Checking, egui::Button::new("Check now"))
-                                .clicked()
-                            {
-                                check_now = true;
+                                ui.label(w::muted("Demo mode: settings are not saved."));
                             }
-                            match state {
-                                UpdateState::Checking => {
-                                    ui.spinner();
+                            ui.add_space(4.0);
+                            close = ui.button("Close").clicked();
+                        });
+                        ui.separator();
+                        ui.allocate_ui_with_layout(column(1.0 / 3.0), Layout::top_down(Align::Min), |ui| {
+                            ui.spacing_mut().item_spacing.y = 10.0;
+                            w::section(ui, "About", concat!("gridwatch ", env!("CARGO_PKG_VERSION")));
+                            ui.label(w::muted(
+                                "gridwatch is free to use. If it helps you, a donation is welcome.",
+                            ));
+                            for (title, subtitle, url, icon) in [
+                                ("Ko-fi", "buy me a coffee", DONATE_KOFI, w::Icon::Cup),
+                                ("PayPal", "paypal.me/lizo", DONATE_PAYPAL, w::Icon::Wallet),
+                            ] {
+                                if w::big_icon_button(ui, icon, title, subtitle)
+                                    .on_hover_text(url)
+                                    .clicked()
+                                {
+                                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                                 }
-                                UpdateState::UpToDate => {
-                                    ui.label(w::muted(concat!(
-                                        "you have the newest version, ",
-                                        env!("CARGO_PKG_VERSION")
-                                    )));
-                                }
-                                UpdateState::CheckFailed(message) => {
-                                    ui.label(w::muted(message));
-                                }
-                                UpdateState::Available(release) => {
-                                    ui.label(format!(
-                                        "{} is available, see the button in the top bar",
-                                        release.version
-                                    ));
-                                }
-                                _ => {}
+                            }
+                            if ui.button("Website").on_hover_text(HOMEPAGE).clicked() {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(HOMEPAGE));
                             }
                         });
-                    } else {
-                        ui.label(w::muted("Demo mode: settings are not saved."));
-                    }
-                    ui.add_space(4.0);
-                    ui.add_space(6.0);
-                    w::section(ui, "About", concat!("gridwatch ", env!("CARGO_PKG_VERSION")));
-                    ui.label(w::muted("Free to use. If it helps you, a donation is welcome."));
-                    ui.horizontal(|ui| {
-                        for (label, url, icon) in [
-                            ("Ko-fi", DONATE_KOFI, w::Icon::Cup),
-                            ("PayPal", DONATE_PAYPAL, w::Icon::Wallet),
-                        ] {
-                            if w::icon_button(ui, icon, label).on_hover_text(url).clicked() {
-                                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                            }
-                        }
-                        if ui.button("Website").on_hover_text(HOMEPAGE).clicked() {
-                            ui.ctx().open_url(egui::OpenUrl::new_tab(HOMEPAGE));
-                        }
                     });
-                    close = ui.button("Close").clicked();
                 });
             });
 

@@ -4,6 +4,11 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.7.1
+
+- The settings window is wider and has two columns: the settings on the left, About with large
+  Ko-fi and PayPal buttons on the right.
+
 ## 0.7.0
 
 - The Ko-fi and PayPal buttons moved out of the top bar into a new About section in the settings.
