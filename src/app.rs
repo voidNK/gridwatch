@@ -25,6 +25,7 @@ const RANGES: [(&str, i64); 6] = [
 /// The screenshot that is taken with the settings window open.
 const SETTINGS_SHOT: &str = "settings.png";
 const DONATE_PAYPAL: &str = "https://paypal.me/lizo";
+const DONATE_KOFI: &str = "https://ko-fi.com/A0A05OS1A";
 const INTERVALS: [u64; 5] = [2, 5, 10, 30, 60];
 const RETENTION_DAYS: [u32; 5] = [1, 7, 14, 30, 90];
 /// Minutes between reminders about problems that stay open; 0 = never.
@@ -1109,6 +1110,9 @@ Click to switch on or off.",
                         "it is free; a donation is welcome if it helps you",
                     );
                     ui.horizontal(|ui| {
+                        if ui.button("Support on Ko-fi").on_hover_text(DONATE_KOFI).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(DONATE_KOFI));
+                        }
                         if ui.button("Donate with PayPal").on_hover_text(DONATE_PAYPAL).clicked() {
                             ui.ctx().open_url(egui::OpenUrl::new_tab(DONATE_PAYPAL));
                         }

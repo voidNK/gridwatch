@@ -165,7 +165,8 @@ that version. The `CI` workflow builds and tests every push and pull request on 
 
 ## Support
 
-gridwatch is free. If it saves you time, a donation is welcome: [paypal.me/lizo](https://paypal.me/lizo).
+gridwatch is free. If it saves you time, a donation is welcome:
+[Ko-fi](https://ko-fi.com/A0A05OS1A) or [PayPal](https://paypal.me/lizo).
 
 ## License
 
