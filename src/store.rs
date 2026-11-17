@@ -1,0 +1,329 @@
+//! Local history in SQLite, plus the JSON config file.
+
+use crate::model::*;
+use anyhow::{Context, Result};
+use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Config {
+    pub servers: Vec<ServerConfig>,
+    #[serde(default = "default_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "default_retention")]
+    pub retention_days: u32,
+}
+
+fn default_interval() -> u64 {
+    5
+}
+
+fn default_retention() -> u32 {
+    14
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            servers: Vec::new(),
+            interval_secs: default_interval(),
+            retention_days: default_retention(),
+        }
+    }
+}
+
+/// Where gridwatch keeps its files on this machine.
+pub struct Paths {
+    pub config: PathBuf,
+    pub database: PathBuf,
+    pub known_hosts: PathBuf,
+}
+
+impl Paths {
+    pub fn resolve() -> Result<Self> {
+        let dirs = directories::ProjectDirs::from("", "", "gridwatch").context("cannot locate the user profile directory")?;
+        std::fs::create_dir_all(dirs.config_dir())?;
+        std::fs::create_dir_all(dirs.data_dir())?;
+        Ok(Self {
+            config: dirs.config_dir().join("config.json"),
+            database: dirs.data_dir().join("history.sqlite"),
+            known_hosts: dirs.data_dir().join("known_hosts"),
+        })
+    }
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let text = std::fs::read_to_string(path)?;
+        serde_json::from_str(&text).with_context(|| format!("invalid config file {}", path.display()))
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+}
+
+pub struct Store {
+    conn: Mutex<Connection>,
+}
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS samples (
+    server_id TEXT NOT NULL, ts INTEGER NOT NULL,
+    cpu REAL, cpu_user REAL, cpu_system REAL, cpu_iowait REAL, cpu_steal REAL,
+    load1 REAL, load5 REAL, load15 REAL,
+    mem_used INTEGER, mem_total INTEGER, swap_used INTEGER,
+    rx_bps REAL, tx_bps REAL, temp REAL, cores TEXT,
+    PRIMARY KEY (server_id, ts)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS container_samples (
+    server_id TEXT NOT NULL, ts INTEGER NOT NULL, name TEXT NOT NULL,
+    cpu REAL, mem_used INTEGER,
+    PRIMARY KEY (server_id, ts, name)
+) WITHOUT ROWID;
+";
+
+/// Number of points a chart gets at most; older data is averaged into buckets.
+const MAX_POINTS: i64 = 720;
+
+impl Store {
+    pub fn open(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        Self::init(conn)
+    }
+
+    pub fn in_memory() -> Result<Self> {
+        Self::init(Connection::open_in_memory()?)
+    }
+
+    fn init(conn: Connection) -> Result<Self> {
+        conn.execute_batch(SCHEMA)?;
+        Ok(Self { conn: Mutex::new(conn) })
+    }
+
+    pub fn insert(&self, server_id: &str, p: &HistPoint, docker: &DockerState) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO samples VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            params![
+                server_id,
+                p.ts,
+                p.cpu.total,
+                p.cpu.user,
+                p.cpu.system,
+                p.cpu.iowait,
+                p.cpu.steal,
+                p.load[0],
+                p.load[1],
+                p.load[2],
+                p.mem_used as i64,
+                p.mem_total as i64,
+                p.swap_used as i64,
+                p.rx_bps,
+                p.tx_bps,
+                p.temp,
+                serde_json::to_string(&p.cores)?,
+            ],
+        )?;
+        if let DockerState::Ok(list) = docker {
+            for c in list.iter().filter(|c| c.has_stats) {
+                tx.execute(
+                    "INSERT OR REPLACE INTO container_samples VALUES (?1,?2,?3,?4,?5)",
+                    params![server_id, p.ts, c.name, c.cpu, c.mem_used as i64],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// History since `since`, averaged into at most `MAX_POINTS` buckets.
+    pub fn load_history(&self, server_id: &str, since: i64, now: i64) -> Result<VecDeque<HistPoint>> {
+        let bucket = ((now - since) / MAX_POINTS).max(1);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT ts, cpu, cpu_user, cpu_system, cpu_iowait, cpu_steal, load1, load5, load15,
+                    mem_used, mem_total, swap_used, rx_bps, tx_bps, temp, cores
+             FROM samples WHERE server_id = ?1 AND ts >= ?2 ORDER BY ts",
+        )?;
+        let rows = stmt.query_map(params![server_id, since], |r| {
+            let cores: String = r.get(15)?;
+            Ok(HistPoint {
+                ts: r.get(0)?,
+                cpu: CpuUsage {
+                    total: r.get(1)?,
+                    user: r.get(2)?,
+                    system: r.get(3)?,
+                    iowait: r.get(4)?,
+                    steal: r.get(5)?,
+                },
+                load: [r.get(6)?, r.get(7)?, r.get(8)?],
+                mem_used: r.get::<_, i64>(9)? as u64,
+                mem_total: r.get::<_, i64>(10)? as u64,
+                swap_used: r.get::<_, i64>(11)? as u64,
+                rx_bps: r.get(12)?,
+                tx_bps: r.get(13)?,
+                temp: r.get(14)?,
+                cores: serde_json::from_str(&cores).unwrap_or_default(),
+            })
+        })?;
+
+        let mut out = VecDeque::new();
+        let mut group: Vec<HistPoint> = Vec::new();
+        for row in rows {
+            let p = row?;
+            if group.first().is_some_and(|g| g.ts / bucket != p.ts / bucket) {
+                out.push_back(average(&group));
+                group.clear();
+            }
+            group.push(p);
+        }
+        if !group.is_empty() {
+            out.push_back(average(&group));
+        }
+        Ok(out)
+    }
+
+    pub fn load_container_history(
+        &self,
+        server_id: &str,
+        since: i64,
+        now: i64,
+    ) -> Result<HashMap<String, VecDeque<ContainerPoint>>> {
+        let bucket = ((now - since) / MAX_POINTS).max(1);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, (ts / ?3) * ?3 AS b, AVG(cpu), AVG(mem_used)
+             FROM container_samples WHERE server_id = ?1 AND ts >= ?2
+             GROUP BY name, b ORDER BY b",
+        )?;
+        let rows = stmt.query_map(params![server_id, since, bucket], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f32>(2)?, r.get::<_, f64>(3)?))
+        })?;
+        let mut out: HashMap<String, VecDeque<ContainerPoint>> = HashMap::new();
+        for row in rows {
+            let (name, ts, cpu, mem) = row?;
+            out.entry(name).or_default().push_back((ts, cpu, mem as u64));
+        }
+        Ok(out)
+    }
+
+    pub fn prune(&self, retention_days: u32, now: i64) -> Result<()> {
+        let cutoff = now - retention_days as i64 * 86400;
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM samples WHERE ts < ?1", params![cutoff])?;
+        conn.execute("DELETE FROM container_samples WHERE ts < ?1", params![cutoff])?;
+        Ok(())
+    }
+
+    pub fn delete_server(&self, server_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM samples WHERE server_id = ?1", params![server_id])?;
+        conn.execute("DELETE FROM container_samples WHERE server_id = ?1", params![server_id])?;
+        Ok(())
+    }
+}
+
+fn average(group: &[HistPoint]) -> HistPoint {
+    if group.len() == 1 {
+        return group[0].clone();
+    }
+    let n = group.len() as f32;
+    let mean = |f: &dyn Fn(&HistPoint) -> f32| group.iter().map(f).sum::<f32>() / n;
+    let mean64 = |f: &dyn Fn(&HistPoint) -> f64| group.iter().map(f).sum::<f64>() / n as f64;
+    let last = &group[group.len() - 1];
+    let temps: Vec<f32> = group.iter().filter_map(|p| p.temp).collect();
+    let mut cores = BTreeMap::new();
+    for p in group {
+        for (i, v) in p.cores.iter().enumerate() {
+            let e = cores.entry(i).or_insert((0.0f32, 0u32));
+            e.0 += v;
+            e.1 += 1;
+        }
+    }
+    HistPoint {
+        ts: group[group.len() / 2].ts,
+        cpu: CpuUsage {
+            total: mean(&|p| p.cpu.total),
+            user: mean(&|p| p.cpu.user),
+            system: mean(&|p| p.cpu.system),
+            iowait: mean(&|p| p.cpu.iowait),
+            steal: mean(&|p| p.cpu.steal),
+        },
+        load: [mean(&|p| p.load[0]), mean(&|p| p.load[1]), mean(&|p| p.load[2])],
+        mem_used: mean64(&|p| p.mem_used as f64) as u64,
+        mem_total: last.mem_total,
+        swap_used: mean64(&|p| p.swap_used as f64) as u64,
+        rx_bps: mean64(&|p| p.rx_bps),
+        tx_bps: mean64(&|p| p.tx_bps),
+        temp: (!temps.is_empty()).then(|| temps.iter().sum::<f32>() / temps.len() as f32),
+        cores: cores.into_values().map(|(sum, count)| sum / count as f32).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(ts: i64, cpu: f32) -> HistPoint {
+        HistPoint {
+            ts,
+            cpu: CpuUsage { total: cpu, ..Default::default() },
+            mem_used: 100,
+            mem_total: 200,
+            cores: vec![cpu, 0.0],
+            temp: Some(50.0),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn roundtrip_bucketing_and_pruning() {
+        let store = Store::in_memory().unwrap();
+        let docker = DockerState::Ok(vec![Container {
+            name: "web".into(),
+            has_stats: true,
+            cpu: 10.0,
+            mem_used: 4096,
+            ..Default::default()
+        }]);
+        for i in 0..10 {
+            store.insert("a", &point(1000 + i, i as f32), &docker).unwrap();
+        }
+        store.insert("b", &point(1005, 99.0), &DockerState::Unknown).unwrap();
+
+        // Short range: one bucket per second, nothing merged.
+        let h = store.load_history("a", 1000, 1010).unwrap();
+        assert_eq!(h.len(), 10);
+        assert_eq!(h[3].cpu.total, 3.0);
+        assert_eq!(h[3].cores, vec![3.0, 0.0]);
+        assert_eq!(h[3].temp, Some(50.0));
+
+        // Long range: 2-second buckets average neighbouring samples.
+        let h = store.load_history("a", 1000, 1000 + 2 * MAX_POINTS).unwrap();
+        assert_eq!(h.len(), 5);
+        assert_eq!(h[0].cpu.total, 0.5);
+
+        let c = store.load_container_history("a", 0, 1010).unwrap();
+        assert_eq!(c["web"].len(), 10);
+        assert_eq!(c["web"][0], (1000, 10.0, 4096));
+
+        store.prune(1, 1005 + 86400).unwrap();
+        assert_eq!(store.load_history("a", 0, 1010).unwrap().len(), 5);
+        store.delete_server("a").unwrap();
+        assert!(store.load_history("a", 0, 1010).unwrap().is_empty());
+        assert_eq!(store.load_history("b", 0, 1010).unwrap().len(), 1);
+    }
+}
