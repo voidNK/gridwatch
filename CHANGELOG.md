@@ -4,6 +4,12 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.8.3
+
+- Fixed: on macOS the update from 0.8.1 or older failed with "the archive does not contain the
+  program", because 0.8.2 moved the program into `gridwatch.app`. The archive now holds the bare
+  program next to the app again, where older versions look for it.
+
 ## 0.8.2
 
 - **macOS**: releases now contain `gridwatch.app`. Started by double click it opens no Terminal

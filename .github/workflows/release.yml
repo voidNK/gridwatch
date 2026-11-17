@@ -77,6 +77,9 @@ jobs:
             sed "s/@VERSION@/${GITHUB_REF_NAME#v}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
             codesign --force --deep --sign - "$app"
             codesign --verify --deep --strict "$app"
+            # The bare program as well: versions up to 0.8.1 look for it there when they update,
+            # and it is handy in a terminal.
+            cp "target/${{ matrix.target }}/release/gridwatch" "$name/"
             tar -czf "$name.tar.gz" "$name"
           else
             cp "target/${{ matrix.target }}/release/gridwatch" "$name/"
