@@ -1018,7 +1018,7 @@ Click to switch on or off.",
             .resizable(true)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
-            .default_size([940.0, 560.0])
+            .default_size([940.0, 680.0])
             .show(ctx, |ui| {
                 // Scrolls when the window is made smaller than its content.
                 ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {

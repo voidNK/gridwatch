@@ -4,6 +4,10 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.8.1
+
+- The settings window opens about a fifth taller, so nothing is cut off at the bottom.
+
 ## 0.8.0
 
 - **Notifications with colour**: desktop notifications start with a red or yellow mark for the
