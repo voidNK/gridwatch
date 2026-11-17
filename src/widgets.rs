@@ -57,59 +57,126 @@ pub fn muted(text: impl Into<String>) -> RichText {
     RichText::new(text).color(MUTED)
 }
 
-/// Header row of a grid; a click on a column title sorts the table by it.
-/// Returns the chosen (column, descending), or `None` while the table keeps its own order.
-/// The first click starts with the largest value (with A for the columns listed in `text`),
-/// the second reverses, the third returns to the table's own order.
-pub fn sort_header(ui: &mut Ui, table: &str, heads: &[&str], text: &[usize]) -> Option<(usize, bool)> {
-    let id = egui::Id::unique(("sort", table));
-    let mut chosen: Option<(usize, bool)> = ui.data(|d| d.get_temp(id));
-    for (column, head) in heads.iter().enumerate() {
-        if head.is_empty() {
-            ui.label("");
-            continue;
-        }
-        let first_descending = !text.contains(&column);
-        let title = match chosen {
-            // The trailing blanks leave room for the arrow that is painted below.
-            Some((c, _)) if c == column => RichText::new(format!("{head}    ")).color(TEXT),
-            _ => muted(*head),
-        };
-        let response = ui
-            .add(egui::Label::new(title).sense(Sense::click()))
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Click to sort");
-        if let Some((_, descending)) = chosen.filter(|c| c.0 == column) {
-            // Painted, because the built-in fonts have no reliable arrow glyph.
-            let center = egui::pos2(response.rect.right() - 5.0, response.rect.center().y);
-            let tip = if descending { 3.0 } else { -3.0 };
-            let points = vec![
-                egui::pos2(center.x - 4.0, center.y - tip),
-                egui::pos2(center.x + 4.0, center.y - tip),
-                egui::pos2(center.x, center.y + tip),
-            ];
-            ui.painter()
-                .add(egui::Shape::convex_polygon(points, TEXT, egui::Stroke::NONE));
-        }
-        if response.clicked() {
-            chosen = match chosen {
-                Some((c, descending)) if c == column && descending == first_descending => Some((column, !descending)),
-                Some((c, _)) if c == column => None,
-                _ => Some((column, first_descending)),
-            };
-            ui.data_mut(|d| match chosen {
-                Some(choice) => {
-                    d.insert_temp(id, choice);
-                }
-                None => d.remove::<(usize, bool)>(id),
-            });
-        }
-    }
-    ui.end_row();
-    chosen
+fn sort_key(table: &str) -> egui::Id {
+    egui::Id::unique(("sort", table))
 }
 
-/// Apply the direction chosen in a [`sort_header`].
+/// The column a table is sorted by and whether descending, as chosen by a click on a
+/// column title of [`table`]; `None` while the table keeps its own order.
+pub fn sort_choice(ui: &Ui, table: &str) -> Option<(usize, bool)> {
+    ui.data(|d| d.get_temp(sort_key(table)))
+}
+
+/// One column title. The first click sorts with the largest value first (with A for text
+/// columns), the second reverses, the third returns to the table's own order.
+fn sort_title(ui: &mut Ui, column: usize, head: &str, first_descending: bool, chosen: &mut Option<(usize, bool)>) {
+    if head.is_empty() {
+        return;
+    }
+    let active = chosen.filter(|c| c.0 == column);
+    let title = match active {
+        // The trailing blanks leave room for the arrow that is painted below.
+        Some(_) => RichText::new(format!("{head}    ")).color(TEXT),
+        None => muted(head),
+    };
+    let response = ui
+        .add(egui::Label::new(title).sense(Sense::click()))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Click to sort, drag the column border to resize");
+    if let Some((_, descending)) = active {
+        // Painted, because the built-in fonts have no reliable arrow glyph.
+        let center = egui::pos2(response.rect.right() - 5.0, response.rect.center().y);
+        let tip = if descending { 3.0 } else { -3.0 };
+        let points = vec![
+            egui::pos2(center.x - 4.0, center.y - tip),
+            egui::pos2(center.x + 4.0, center.y - tip),
+            egui::pos2(center.x, center.y + tip),
+        ];
+        ui.painter()
+            .add(egui::Shape::convex_polygon(points, TEXT, egui::Stroke::NONE));
+    }
+    if response.clicked() {
+        *chosen = match active {
+            Some((_, descending)) if descending == first_descending => Some((column, !descending)),
+            Some(_) => None,
+            None => Some((column, first_descending)),
+        };
+    }
+}
+
+/// The cells of one table row, filled from left to right.
+pub struct Cells<'a, 'b, 'c> {
+    row: &'c mut egui_extras::TableRow<'a, 'b>,
+}
+
+impl Cells<'_, '_, '_> {
+    pub fn cell(&mut self, add: impl FnOnce(&mut Ui)) {
+        self.row.col(|ui| {
+            // Never wrap: a narrow column cuts its content off instead of growing taller.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            add(ui);
+        });
+    }
+
+    pub fn text(&mut self, text: impl Into<egui::WidgetText>) {
+        self.cell(|ui| {
+            ui.label(text);
+        });
+    }
+}
+
+/// A striped table. Columns are as wide as their content until the user drags a column
+/// border; a click on a title sorts (see [`sort_choice`]). `text` lists the columns that
+/// hold text rather than numbers. `add_row` is called with the index of each row.
+pub fn table(
+    ui: &mut Ui,
+    id: &str,
+    heads: &[&str],
+    text: &[usize],
+    rows: usize,
+    mut add_row: impl FnMut(usize, &mut Cells),
+) {
+    use egui_extras::{Column, TableBuilder};
+    let before = sort_choice(ui, id);
+    let mut chosen = before;
+    let mut builder = TableBuilder::new(ui)
+        .id_salt(id)
+        .striped(true)
+        .resizable(true)
+        .vscroll(false)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+    for column in 0..heads.len() {
+        // The last column takes the rest of the width.
+        builder = builder.column(if column + 1 == heads.len() {
+            Column::remainder().at_least(40.0).clip(true)
+        } else {
+            Column::auto().at_least(24.0).clip(true)
+        });
+    }
+    builder
+        .header(24.0, |mut header| {
+            for (column, head) in heads.iter().enumerate() {
+                header.col(|ui| sort_title(ui, column, head, !text.contains(&column), &mut chosen));
+            }
+        })
+        .body(|body| {
+            body.rows(26.0, rows, |mut row| {
+                let index = row.index();
+                add_row(index, &mut Cells { row: &mut row });
+            });
+        });
+    if chosen != before {
+        ui.data_mut(|d| match chosen {
+            Some(choice) => {
+                d.insert_temp(sort_key(id), choice);
+            }
+            None => d.remove::<(usize, bool)>(sort_key(id)),
+        });
+        ui.ctx().request_repaint();
+    }
+}
+
+/// Apply the direction from [`sort_choice`].
 pub fn directed(order: std::cmp::Ordering, descending: bool) -> std::cmp::Ordering {
     if descending { order.reverse() } else { order }
 }

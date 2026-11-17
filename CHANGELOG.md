@@ -4,10 +4,19 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.5.0
+
+- **Resizable columns**: drag the border between two column titles to make a column wider or
+  narrower, in every table. Content that no longer fits is cut off instead of wrapping.
+- The server list shows two lines per server: state, name and alerts, then CPU and memory.
+- The settings window can be resized and moved.
+- Settings has a button to support gridwatch with a donation.
+- The top bar is tidier: the word "Range" and the history retention note are gone.
+
 ## 0.4.1
 
-- The server list is compact: one line per server instead of five, so many servers fit without
-  scrolling. The address, the state and the number of alerts appear when the pointer rests on a server.
+- The server list is more compact, so more servers fit without scrolling. The address appears
+  when the pointer rests on a server.
 
 ## 0.4.0
 

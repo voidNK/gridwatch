@@ -163,6 +163,10 @@ The `Release` workflow checks that the tag matches `Cargo.toml`, builds for Wind
 macOS (Apple Silicon and Intel) and attaches the archives to a GitHub release with the notes of
 that version. The `CI` workflow builds and tests every push and pull request on all three systems.
 
+## Support
+
+gridwatch is free. If it saves you time, a donation is welcome: [paypal.me/lizo](https://paypal.me/lizo).
+
 ## License
 
 gridwatch is free to use, change and pass on, by private people and by companies alike.

@@ -24,6 +24,7 @@ const RANGES: [(&str, i64); 6] = [
 ];
 /// The screenshot that is taken with the settings window open.
 const SETTINGS_SHOT: &str = "settings.png";
+const DONATE_PAYPAL: &str = "https://paypal.me/lizo";
 const INTERVALS: [u64; 5] = [2, 5, 10, 30, 60];
 const RETENTION_DAYS: [u32; 5] = [1, 7, 14, 30, 90];
 /// Minutes between reminders about problems that stay open; 0 = never.
@@ -536,7 +537,6 @@ impl App {
                 ui.label(w::muted("demo data"));
             }
             ui.add_space(18.0);
-            ui.label(w::muted("Range"));
             let mut range = self.range;
             for (i, (label, _)) in RANGES.iter().enumerate() {
                 ui.selectable_value(&mut range, i, *label);
@@ -578,14 +578,6 @@ Click to switch on or off.",
                 if !self.is_demo() && ui.button("+ Add server").clicked() {
                     self.open_dialog(None);
                 }
-                if let Some(paths) = &self.paths {
-                    ui.label(w::muted(format!("history kept {} days", self.config.retention_days)))
-                        .on_hover_text(format!(
-                            "Config: {}\nHistory: {}",
-                            paths.config.display(),
-                            paths.database.display()
-                        ));
-                }
             });
         });
     }
@@ -619,34 +611,21 @@ Click to switch on or off.",
                     .fill(fill)
                     .stroke(egui::Stroke::new(1.0, if selected { w::AXIS } else { w::GRID }))
                     .corner_radius(CornerRadius::same(5))
-                    .inner_margin(Margin::symmetric(8, 3))
+                    .inner_margin(Margin::symmetric(8, 5))
                     .show(ui, |ui| {
-                        // One line per server, so that many of them fit without scrolling:
-                        // state and name on the left, CPU and memory on the right.
+                        // Two lines per server: state and name, then CPU and memory.
                         ui.set_width(ui.available_width());
-                        ui.spacing_mut().item_spacing.x = 5.0;
+                        ui.spacing_mut().item_spacing = egui::vec2(5.0, 3.0);
                         let (color, label) = conn_status(&state);
+                        let small = |text: String, color: Color32| RichText::new(text).size(11.5).color(color);
                         ui.horizontal(|ui| {
                             let (dot, _) = ui.allocate_exact_size(egui::Vec2::splat(9.0), Sense::hover());
                             ui.painter().circle_filled(dot.center(), 4.5, color);
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let small = |text: String, color: Color32| RichText::new(text).size(11.5).color(color);
-                                match &state.latest {
-                                    Some(s) if matches!(state.conn, ConnState::Online) => {
-                                        let mem = s.mem_used as f32 / s.mem_total.max(1) as f32 * 100.0;
-                                        for (name, value) in [("mem", mem), ("cpu", s.cpu.total)] {
-                                            let level = w::level(value, 85.0, 95.0).map_or(w::TEXT_SECONDARY, |l| l.0);
-                                            ui.label(small(format!("{value:.0}%"), level));
-                                            ui.label(small(name.to_string(), w::MUTED));
-                                        }
-                                    }
-                                    // Not online: the state in words instead of numbers.
-                                    _ => {
-                                        ui.label(small(label.to_string(), w::TEXT_SECONDARY));
-                                    }
-                                }
+                                ui.label(small(label.to_string(), w::TEXT_SECONDARY));
                                 if alerts > 0 {
-                                    ui.label(small(format!("{alerts} !"), w::WARNING));
+                                    let text = format!("{alerts} alert{}", if alerts == 1 { "" } else { "s" });
+                                    ui.label(small(text, w::WARNING));
                                 }
                                 // The name gets what is left and is cut off if it does not fit.
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
@@ -654,19 +633,27 @@ Click to switch on or off.",
                                 });
                             });
                         });
+                        match &state.latest {
+                            Some(s) => {
+                                let mem = s.mem_used as f32 / s.mem_total.max(1) as f32;
+                                ui.horizontal(|ui| {
+                                    for (name, fraction) in [("cpu", s.cpu.total / 100.0), ("mem", mem)] {
+                                        ui.label(small(name.to_string(), w::MUTED));
+                                        w::meter(ui, fraction, 50.0);
+                                        ui.label(small(format!("{:.0}%", fraction * 100.0), w::TEXT_SECONDARY));
+                                        ui.add_space(4.0);
+                                    }
+                                });
+                            }
+                            // Nothing measured yet: say where it is instead.
+                            None => {
+                                ui.label(small(server.cfg.address(), w::MUTED));
+                            }
+                        }
                     })
                     .response
                     .interact(Sense::click_and_drag())
-                    .on_hover_text(format!(
-                        "{}\n{}{}",
-                        server.cfg.address(),
-                        conn_status(&state).1,
-                        match alerts {
-                            0 => String::new(),
-                            1 => ", 1 alert".to_string(),
-                            n => format!(", {n} alerts"),
-                        }
-                    ));
+                    .on_hover_text(server.cfg.address());
                 cards.push(response.rect);
                 if response.clicked() {
                     clicked = Some(i);
@@ -978,140 +965,156 @@ Click to switch on or off.",
         egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(true)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .default_size([640.0, 620.0])
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 8.0;
-                let n = &mut self.config.notifications;
-                w::section(ui, "Notifications", "when a server gets into trouble");
-                ui.checkbox(&mut n.enabled, "Alerts enabled")
-                    .on_hover_text("Same switch as the bell in the top bar.");
-                ui.add_enabled_ui(n.enabled, |ui| {
-                    egui::Grid::new("notify-form")
+                // Scrolls when the window is made smaller than its content.
+                ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    let n = &mut self.config.notifications;
+                    w::section(ui, "Notifications", "when a server gets into trouble");
+                    ui.checkbox(&mut n.enabled, "Alerts enabled")
+                        .on_hover_text("Same switch as the bell in the top bar.");
+                    ui.add_enabled_ui(n.enabled, |ui| {
+                        egui::Grid::new("notify-form")
+                            .num_columns(2)
+                            .spacing([16.0, 8.0])
+                            .show(ui, |ui| {
+                                ui.checkbox(&mut n.sound, "Play a sound");
+                                ui.add_enabled_ui(n.sound, |ui| {
+                                    ui.horizontal(|ui| {
+                                        let mut pct = n.volume * 100.0;
+                                        ui.add(
+                                            egui::Slider::new(&mut pct, 5.0..=100.0)
+                                                .fixed_decimals(0)
+                                                .suffix("%")
+                                                .text("volume"),
+                                        );
+                                        n.volume = pct / 100.0;
+                                    });
+                                });
+                                ui.end_row();
+                                ui.checkbox(&mut n.desktop, "Show a desktop notification");
+                                ui.label(w::muted("Windows toast, macOS Notification Center, Linux desktop"));
+                                ui.end_row();
+                                ui.label("Alert on");
+                                ui.horizontal(|ui| {
+                                    ui.selectable_value(&mut n.critical_only, false, "Warnings and critical");
+                                    ui.selectable_value(&mut n.critical_only, true, "Critical only");
+                                });
+                                ui.end_row();
+                                ui.checkbox(&mut n.offline, "Server unreachable");
+                                ui.label(w::muted("alert when the SSH connection is lost or fails"));
+                                ui.end_row();
+                                ui.label("Remind me");
+                                let text = |m: u32| {
+                                    if m == 0 {
+                                        "never".to_string()
+                                    } else {
+                                        format!("every {m} min")
+                                    }
+                                };
+                                ui.horizontal(|ui| {
+                                    egui::ComboBox::from_id_salt("repeat")
+                                        .width(110.0)
+                                        .selected_text(text(n.repeat_minutes))
+                                        .show_ui(ui, |ui| {
+                                            for m in REPEAT_MINUTES {
+                                                ui.selectable_value(&mut n.repeat_minutes, m, text(m));
+                                            }
+                                        });
+                                    ui.label(w::muted("while problems stay open"));
+                                });
+                                ui.end_row();
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Test warning").clicked() {
+                            test = Some(Severity::Warning);
+                        }
+                        if ui.button("Test critical").clicked() {
+                            test = Some(Severity::Critical);
+                        }
+                        ui.label(w::muted("A problem is announced once, and again if it gets worse."));
+                    });
+
+                    ui.add_space(6.0);
+                    w::section(ui, "Data", "");
+                    egui::Grid::new("data-form")
                         .num_columns(2)
                         .spacing([16.0, 8.0])
                         .show(ui, |ui| {
-                            ui.checkbox(&mut n.sound, "Play a sound");
-                            ui.add_enabled_ui(n.sound, |ui| {
-                                ui.horizontal(|ui| {
-                                    let mut pct = n.volume * 100.0;
-                                    ui.add(
-                                        egui::Slider::new(&mut pct, 5.0..=100.0)
-                                            .fixed_decimals(0)
-                                            .suffix("%")
-                                            .text("volume"),
-                                    );
-                                    n.volume = pct / 100.0;
+                            ui.label("Refresh every");
+                            egui::ComboBox::from_id_salt("settings-interval")
+                                .width(110.0)
+                                .selected_text(format!("{} s", self.config.interval_secs))
+                                .show_ui(ui, |ui| {
+                                    for v in INTERVALS {
+                                        ui.selectable_value(&mut self.config.interval_secs, v, format!("{v} s"));
+                                    }
                                 });
-                            });
                             ui.end_row();
-                            ui.checkbox(&mut n.desktop, "Show a desktop notification");
-                            ui.label(w::muted("Windows toast, macOS Notification Center, Linux desktop"));
+                            ui.label("Keep history for");
+                            egui::ComboBox::from_id_salt("retention")
+                                .width(110.0)
+                                .selected_text(format!("{} days", self.config.retention_days))
+                                .show_ui(ui, |ui| {
+                                    for v in RETENTION_DAYS {
+                                        ui.selectable_value(&mut self.config.retention_days, v, format!("{v} days"));
+                                    }
+                                });
                             ui.end_row();
-                            ui.label("Alert on");
-                            ui.horizontal(|ui| {
-                                ui.selectable_value(&mut n.critical_only, false, "Warnings and critical");
-                                ui.selectable_value(&mut n.critical_only, true, "Critical only");
-                            });
-                            ui.end_row();
-                            ui.checkbox(&mut n.offline, "Server unreachable");
-                            ui.label(w::muted("alert when the SSH connection is lost or fails"));
-                            ui.end_row();
-                            ui.label("Remind me");
-                            let text = |m: u32| {
-                                if m == 0 {
-                                    "never".to_string()
-                                } else {
-                                    format!("every {m} min")
-                                }
-                            };
-                            ui.horizontal(|ui| {
-                                egui::ComboBox::from_id_salt("repeat")
-                                    .width(110.0)
-                                    .selected_text(text(n.repeat_minutes))
-                                    .show_ui(ui, |ui| {
-                                        for m in REPEAT_MINUTES {
-                                            ui.selectable_value(&mut n.repeat_minutes, m, text(m));
-                                        }
-                                    });
-                                ui.label(w::muted("while problems stay open"));
-                            });
-                            ui.end_row();
+                            if let Some(paths) = &self.paths {
+                                ui.label("Settings file");
+                                ui.label(w::muted(paths.config.display().to_string()));
+                                ui.end_row();
+                                ui.label("History");
+                                ui.label(w::muted(paths.database.display().to_string()));
+                                ui.end_row();
+                            }
                         });
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Test warning").clicked() {
-                        test = Some(Severity::Warning);
-                    }
-                    if ui.button("Test critical").clicked() {
-                        test = Some(Severity::Critical);
-                    }
-                    ui.label(w::muted("A problem is announced once, and again if it gets worse."));
-                });
-
-                ui.add_space(6.0);
-                w::section(ui, "Data", "");
-                egui::Grid::new("data-form")
-                    .num_columns(2)
-                    .spacing([16.0, 8.0])
-                    .show(ui, |ui| {
-                        ui.label("Refresh every");
-                        egui::ComboBox::from_id_salt("settings-interval")
-                            .width(110.0)
-                            .selected_text(format!("{} s", self.config.interval_secs))
-                            .show_ui(ui, |ui| {
-                                for v in INTERVALS {
-                                    ui.selectable_value(&mut self.config.interval_secs, v, format!("{v} s"));
-                                }
+                    if self.paths.is_some() {
+                        ui.add_space(6.0);
+                        w::section(ui, "This computer", "");
+                        ui.checkbox(&mut self.config.show_local, "Show this computer in the server list");
+                        if cfg!(windows) {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.config.show_wsl, "Show its Linux (WSL)");
+                                ui.label(w::muted("the default distribution; watching it keeps WSL running"));
                             });
-                        ui.end_row();
-                        ui.label("Keep history for");
-                        egui::ComboBox::from_id_salt("retention")
-                            .width(110.0)
-                            .selected_text(format!("{} days", self.config.retention_days))
-                            .show_ui(ui, |ui| {
-                                for v in RETENTION_DAYS {
-                                    ui.selectable_value(&mut self.config.retention_days, v, format!("{v} days"));
-                                }
-                            });
-                        ui.end_row();
-                        if let Some(paths) = &self.paths {
-                            ui.label("Settings file");
-                            ui.label(w::muted(paths.config.display().to_string()));
-                            ui.end_row();
-                            ui.label("History");
-                            ui.label(w::muted(paths.database.display().to_string()));
-                            ui.end_row();
+                        }
+                        ui.horizontal(|ui| {
+                            ui.checkbox(
+                                &mut self.config.remember_secrets,
+                                "Save passwords in the system keychain",
+                            );
+                            ui.label(w::muted(if cfg!(windows) {
+                                "Windows Credential Manager"
+                            } else if cfg!(target_os = "macos") {
+                                "macOS Keychain"
+                            } else {
+                                "GNOME Keyring or KWallet"
+                            }));
+                        });
+                    } else {
+                        ui.label(w::muted("Demo mode: settings are not saved."));
+                    }
+                    ui.add_space(4.0);
+                    ui.add_space(6.0);
+                    w::section(
+                        ui,
+                        "Support gridwatch",
+                        "it is free; a donation is welcome if it helps you",
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Donate with PayPal").on_hover_text(DONATE_PAYPAL).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(DONATE_PAYPAL));
                         }
                     });
-                if self.paths.is_some() {
-                    ui.add_space(6.0);
-                    w::section(ui, "This computer", "");
-                    ui.checkbox(&mut self.config.show_local, "Show this computer in the server list");
-                    if cfg!(windows) {
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut self.config.show_wsl, "Show its Linux (WSL)");
-                            ui.label(w::muted("the default distribution; watching it keeps WSL running"));
-                        });
-                    }
-                    ui.horizontal(|ui| {
-                        ui.checkbox(
-                            &mut self.config.remember_secrets,
-                            "Save passwords in the system keychain",
-                        );
-                        ui.label(w::muted(if cfg!(windows) {
-                            "Windows Credential Manager"
-                        } else if cfg!(target_os = "macos") {
-                            "macOS Keychain"
-                        } else {
-                            "GNOME Keyring or KWallet"
-                        }));
-                    });
-                } else {
-                    ui.label(w::muted("Demo mode: settings are not saved."));
-                }
-                ui.add_space(4.0);
-                close = ui.button("Close").clicked();
+                    close = ui.button("Close").clicked();
+                });
             });
 
         if self.config.interval_secs != before.interval_secs {
@@ -1285,33 +1288,27 @@ fn overview_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64))
 fn filesystems_card(ui: &mut Ui, s: &Sample) {
     w::card(ui, |ui| {
         w::section(ui, "Filesystems", "");
-        egui::Grid::new("disks")
-            .num_columns(5)
-            .spacing([24.0, 8.0])
-            .show(ui, |ui| {
-                let mut rows: Vec<&Disk> = s.disks.iter().collect();
-                if let Some((column, descending)) =
-                    w::sort_header(ui, "filesystems", &["Mount", "Type", "", "Used", "Size"], &[0, 1])
-                {
-                    rows.sort_by(|a, b| {
-                        let order = match column {
-                            0 => a.mount.cmp(&b.mount),
-                            1 => a.fstype.cmp(&b.fstype),
-                            3 => a.pct().total_cmp(&b.pct()),
-                            _ => a.total.cmp(&b.total),
-                        };
-                        w::directed(order, descending)
-                    });
-                }
-                for d in rows {
-                    ui.label(&d.mount);
-                    ui.label(w::muted(&d.fstype));
-                    w::meter(ui, d.pct() / 100.0, 260.0);
-                    ui.label(format!("{:.0}%", d.pct()));
-                    ui.label(w::muted(format!("{} of {}", fmt_bytes(d.used), fmt_bytes(d.total))));
-                    ui.end_row();
-                }
+        let mut rows: Vec<&Disk> = s.disks.iter().collect();
+        if let Some((column, descending)) = w::sort_choice(ui, "filesystems") {
+            rows.sort_by(|a, b| {
+                let order = match column {
+                    0 => a.mount.cmp(&b.mount),
+                    1 => a.fstype.cmp(&b.fstype),
+                    2 | 3 => a.pct().total_cmp(&b.pct()),
+                    _ => a.total.cmp(&b.total),
+                };
+                w::directed(order, descending)
             });
+        }
+        let heads = ["Mount", "Type", "Used", "", "Size"];
+        w::table(ui, "filesystems", &heads, &[0, 1], rows.len(), |i, c| {
+            let d = rows[i];
+            c.text(d.mount.as_str());
+            c.text(w::muted(&d.fstype));
+            c.cell(|ui| w::meter(ui, d.pct() / 100.0, 260.0));
+            c.text(format!("{:.0}%", d.pct()));
+            c.text(w::muted(format!("{} of {}", fmt_bytes(d.used), fmt_bytes(d.total))));
+        });
         if s.swap_total > 0 {
             ui.label(w::muted(format!(
                 "Swap: {} of {} used",
@@ -1524,47 +1521,37 @@ fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String) {
     // Busiest first unless a column was clicked.
     procs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.rss.cmp(&a.rss)));
     w::card(ui, |ui| {
-        egui::Grid::new("procs")
-            .num_columns(8)
-            .striped(true)
-            .spacing([18.0, 7.0])
-            .show(ui, |ui| {
-                let heads = ["PID", "User", "CPU", "", "Memory", "RSS", "Running", "Command"];
-                if let Some((column, descending)) = w::sort_header(ui, "procs", &heads, &[1, 7]) {
-                    procs.sort_by(|a, b| {
-                        let order = match column {
-                            0 => a.pid.cmp(&b.pid),
-                            1 => a.user.cmp(&b.user),
-                            2 => a.cpu.total_cmp(&b.cpu),
-                            4 => a.mem_pct.total_cmp(&b.mem_pct),
-                            5 => a.rss.cmp(&b.rss),
-                            6 => a.elapsed.cmp(&b.elapsed),
-                            _ => a.cmd.cmp(&b.cmd),
-                        };
-                        w::directed(order, descending)
-                    });
-                }
-                for p in procs.iter().take(80) {
-                    ui.label(RichText::new(p.pid.to_string()).monospace());
-                    ui.label(&p.user);
-                    ui.label(format!("{:.1}%", p.cpu));
-                    w::bar(ui, p.cpu / 100.0, 90.0, w::SERIES[0]);
-                    ui.label(format!("{:.1}%", p.mem_pct));
-                    ui.label(fmt_bytes(p.rss));
-                    ui.label(w::muted(fmt_duration(p.elapsed)));
-                    let cmd: String = p.cmd.chars().take(84).collect();
-                    let label =
-                        ui.label(
-                            RichText::new(cmd)
-                                .monospace()
-                                .color(if p.state == 'Z' { w::MUTED } else { w::TEXT }),
-                        );
-                    if p.cmd.chars().count() > 84 {
-                        label.on_hover_text(&p.cmd);
-                    }
-                    ui.end_row();
-                }
+        if let Some((column, descending)) = w::sort_choice(ui, "procs") {
+            procs.sort_by(|a, b| {
+                let order = match column {
+                    0 => a.pid.cmp(&b.pid),
+                    1 => a.user.cmp(&b.user),
+                    2 | 3 => a.cpu.total_cmp(&b.cpu),
+                    4 => a.mem_pct.total_cmp(&b.mem_pct),
+                    5 => a.rss.cmp(&b.rss),
+                    6 => a.elapsed.cmp(&b.elapsed),
+                    _ => a.cmd.cmp(&b.cmd),
+                };
+                w::directed(order, descending)
             });
+        }
+        let heads = ["PID", "User", "CPU", "", "Memory", "RSS", "Running", "Command"];
+        w::table(ui, "procs", &heads, &[1, 7], procs.len().min(80), |i, c| {
+            let p = procs[i];
+            c.text(RichText::new(p.pid.to_string()).monospace());
+            c.text(p.user.as_str());
+            c.text(format!("{:.1}%", p.cpu));
+            c.cell(|ui| w::bar(ui, p.cpu / 100.0, 90.0, w::SERIES[0]));
+            c.text(format!("{:.1}%", p.mem_pct));
+            c.text(fmt_bytes(p.rss));
+            c.text(w::muted(fmt_duration(p.elapsed)));
+            c.cell(|ui| {
+                // Cut off at the edge of the window; the tooltip has the whole command.
+                let color = if p.state == 'Z' { w::MUTED } else { w::TEXT };
+                ui.label(RichText::new(&p.cmd).monospace().color(color))
+                    .on_hover_text(&p.cmd);
+            });
+        });
         if procs.is_empty() {
             ui.label(w::muted("No process matches the filter."));
         }
@@ -1673,57 +1660,51 @@ fn network_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) 
             return;
         }
         let top = s.net.iter().map(|n| n.rx_bps.max(n.tx_bps)).fold(1.0, f64::max);
-        egui::Grid::new("interfaces")
-            .num_columns(8)
-            .striped(true)
-            .spacing([24.0, 8.0])
-            .show(ui, |ui| {
-                // Real ports on top, then whatever carried the most.
-                let mut rows: Vec<&NetIface> = s.net.iter().collect();
-                rows.sort_by(|a, b| {
-                    b.physical
-                        .cmp(&a.physical)
-                        .then((b.rx_total + b.tx_total).cmp(&(a.rx_total + a.tx_total)))
-                });
-                let heads = [
-                    "Interface",
-                    "Received",
-                    "",
-                    "Sent",
-                    "",
-                    "Total received",
-                    "Total sent",
-                    "Kind",
-                ];
-                if let Some((column, descending)) = w::sort_header(ui, "interfaces", &heads, &[0]) {
-                    rows.sort_by(|a, b| {
-                        let order = match column {
-                            0 => a.name.cmp(&b.name),
-                            1 => a.rx_bps.total_cmp(&b.rx_bps),
-                            3 => a.tx_bps.total_cmp(&b.tx_bps),
-                            5 => a.rx_total.cmp(&b.rx_total),
-                            6 => a.tx_total.cmp(&b.tx_total),
-                            _ => a.physical.cmp(&b.physical),
-                        };
-                        w::directed(order, descending)
-                    });
-                }
-                for n in rows {
-                    ui.label(RichText::new(&n.name).strong());
-                    ui.label(fmt_rate(n.rx_bps));
-                    w::bar(ui, (n.rx_bps / top) as f32, 110.0, w::SERIES[0]);
-                    ui.label(fmt_rate(n.tx_bps));
-                    w::bar(ui, (n.tx_bps / top) as f32, 110.0, w::SERIES[1]);
-                    ui.label(fmt_bytes(n.rx_total));
-                    ui.label(fmt_bytes(n.tx_total));
-                    ui.label(w::muted(if n.physical {
-                        "port"
-                    } else {
-                        "virtual, not in the totals"
-                    }));
-                    ui.end_row();
-                }
+        // Real ports on top, then whatever carried the most.
+        let mut rows: Vec<&NetIface> = s.net.iter().collect();
+        rows.sort_by(|a, b| {
+            b.physical
+                .cmp(&a.physical)
+                .then((b.rx_total + b.tx_total).cmp(&(a.rx_total + a.tx_total)))
+        });
+        if let Some((column, descending)) = w::sort_choice(ui, "interfaces") {
+            rows.sort_by(|a, b| {
+                let order = match column {
+                    0 => a.name.cmp(&b.name),
+                    1 | 2 => a.rx_bps.total_cmp(&b.rx_bps),
+                    3 | 4 => a.tx_bps.total_cmp(&b.tx_bps),
+                    5 => a.rx_total.cmp(&b.rx_total),
+                    6 => a.tx_total.cmp(&b.tx_total),
+                    _ => a.physical.cmp(&b.physical),
+                };
+                w::directed(order, descending)
             });
+        }
+        let heads = [
+            "Interface",
+            "Received",
+            "",
+            "Sent",
+            "",
+            "Total received",
+            "Total sent",
+            "Kind",
+        ];
+        w::table(ui, "interfaces", &heads, &[0], rows.len(), |i, c| {
+            let n = rows[i];
+            c.text(RichText::new(&n.name).strong());
+            c.text(fmt_rate(n.rx_bps));
+            c.cell(|ui| w::bar(ui, (n.rx_bps / top) as f32, 110.0, w::SERIES[0]));
+            c.text(fmt_rate(n.tx_bps));
+            c.cell(|ui| w::bar(ui, (n.tx_bps / top) as f32, 110.0, w::SERIES[1]));
+            c.text(fmt_bytes(n.rx_total));
+            c.text(fmt_bytes(n.tx_total));
+            c.text(w::muted(if n.physical {
+                "port"
+            } else {
+                "virtual, not in the totals"
+            }));
+        });
     });
 }
 
@@ -1831,46 +1812,39 @@ fn disks_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
         } else {
             &["Disk", "Read", "Write"]
         };
-        egui::Grid::new("disk-io")
-            .num_columns(heads.len())
-            .striped(true)
-            .spacing([28.0, 8.0])
-            .show(ui, |ui| {
-                let mut rows: Vec<&DiskIo> = s.disk_io.iter().collect();
-                if let Some((column, descending)) = w::sort_header(ui, "disk-io", heads, &[0]) {
-                    rows.sort_by(|a, b| {
-                        let order = match column {
-                            0 => a.name.cmp(&b.name),
-                            1 => a.read_bps.total_cmp(&b.read_bps),
-                            2 => a.write_bps.total_cmp(&b.write_bps),
-                            3 => a.iops.total_cmp(&b.iops),
-                            _ => a.util.unwrap_or(0.0).total_cmp(&b.util.unwrap_or(0.0)),
-                        };
-                        w::directed(order, descending)
-                    });
-                }
-                for d in rows {
-                    ui.label(RichText::new(&d.name).strong());
-                    ui.label(fmt_bytes_rate(d.read_bps));
-                    ui.label(fmt_bytes_rate(d.write_bps));
-                    if !detailed {
-                        ui.end_row();
-                        continue;
-                    }
-                    ui.label(format!("{:.0}", d.iops));
-                    match d.util {
-                        Some(util) => {
-                            ui.label(format!("{util:.0}%"));
-                            w::meter(ui, util / 100.0, 220.0);
-                        }
-                        None => {
-                            ui.label(w::muted("–"));
-                            ui.label(w::muted("not reported by this system"));
-                        }
-                    }
-                    ui.end_row();
-                }
+        let mut rows: Vec<&DiskIo> = s.disk_io.iter().collect();
+        if let Some((column, descending)) = w::sort_choice(ui, "disk-io") {
+            rows.sort_by(|a, b| {
+                let order = match column {
+                    0 => a.name.cmp(&b.name),
+                    1 => a.read_bps.total_cmp(&b.read_bps),
+                    2 => a.write_bps.total_cmp(&b.write_bps),
+                    3 => a.iops.total_cmp(&b.iops),
+                    _ => a.util.unwrap_or(0.0).total_cmp(&b.util.unwrap_or(0.0)),
+                };
+                w::directed(order, descending)
             });
+        }
+        w::table(ui, "disk-io", heads, &[0], rows.len(), |i, c| {
+            let d = rows[i];
+            c.text(RichText::new(&d.name).strong());
+            c.text(fmt_bytes_rate(d.read_bps));
+            c.text(fmt_bytes_rate(d.write_bps));
+            if !detailed {
+                return;
+            }
+            c.text(format!("{:.0}", d.iops));
+            match d.util {
+                Some(util) => {
+                    c.text(format!("{util:.0}%"));
+                    c.cell(|ui| w::meter(ui, util / 100.0, 220.0));
+                }
+                None => {
+                    c.text(w::muted("–"));
+                    c.text(w::muted("not reported by this system"));
+                }
+            }
+        });
     });
     filesystems_card(ui, s);
 }
@@ -1955,43 +1929,31 @@ fn temps_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
 
     w::card(ui, |ui| {
         w::section(ui, "All sensors", "");
-        egui::Grid::new("sensors")
-            .num_columns(5)
-            .striped(true)
-            .spacing([28.0, 8.0])
-            .show(ui, |ui| {
-                let mut rows: Vec<&Sensor> = s.sensors.iter().collect();
-                if let Some((column, descending)) = w::sort_header(
-                    ui,
-                    "sensors",
-                    &["Chip", "Reading", "Kind", "Temperature", ""],
-                    &[0, 1, 2],
-                ) {
-                    rows.sort_by(|a, b| {
-                        let order = match column {
-                            0 => a.chip.cmp(&b.chip),
-                            1 => a.label.cmp(&b.label),
-                            2 => a.kind().label().cmp(b.kind().label()),
-                            _ => a.temp.total_cmp(&b.temp),
-                        };
-                        w::directed(order, descending)
-                    });
-                }
-                for x in rows {
-                    let (warm, hot) = x.limits();
-                    ui.label(RichText::new(&x.chip).strong());
-                    ui.label(if x.label.is_empty() { "–" } else { x.label.as_str() });
-                    ui.label(w::muted(x.kind().label()));
-                    ui.label(format!("{:.1} °C", x.temp));
-                    match w::level(x.temp, warm, hot).filter(|_| x.kind() != SensorKind::Other) {
-                        Some((color, label)) => w::status(ui, color, label),
-                        None => {
-                            ui.label("");
-                        }
-                    }
-                    ui.end_row();
-                }
+        let mut rows: Vec<&Sensor> = s.sensors.iter().collect();
+        if let Some((column, descending)) = w::sort_choice(ui, "sensors") {
+            rows.sort_by(|a, b| {
+                let order = match column {
+                    0 => a.chip.cmp(&b.chip),
+                    1 => a.label.cmp(&b.label),
+                    2 => a.kind().label().cmp(b.kind().label()),
+                    _ => a.temp.total_cmp(&b.temp),
+                };
+                w::directed(order, descending)
             });
+        }
+        let heads = ["Chip", "Reading", "Kind", "Temperature", ""];
+        w::table(ui, "sensors", &heads, &[0, 1, 2], rows.len(), |i, c| {
+            let x = rows[i];
+            let (warm, hot) = x.limits();
+            c.text(RichText::new(&x.chip).strong());
+            c.text(if x.label.is_empty() { "–" } else { x.label.as_str() });
+            c.text(w::muted(x.kind().label()));
+            c.text(format!("{:.1} °C", x.temp));
+            match w::level(x.temp, warm, hot).filter(|_| x.kind() != SensorKind::Other) {
+                Some((color, label)) => c.cell(|ui| w::status(ui, color, label)),
+                None => c.text(""),
+            }
+        });
         let sata = s.disk_io.iter().any(|d| d.name.starts_with("sd"));
         if sata && !s.info.is_mac && !s.sensors.iter().any(|x| x.chip.starts_with("drivetemp")) {
             ui.add_space(4.0);
@@ -2102,45 +2064,35 @@ fn gpu_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
     });
 
     w::card(ui, |ui| {
-        egui::Grid::new("gpus")
-            .num_columns(7)
-            .striped(true)
-            .spacing([28.0, 8.0])
-            .show(ui, |ui| {
-                let mut rows: Vec<(usize, &Gpu)> = s.gpus.iter().enumerate().collect();
-                if let Some((column, descending)) = w::sort_header(
-                    ui,
-                    "gpus",
-                    &["#", "Name", "Load", "", "Memory", "Temperature", "Power"],
-                    &[0, 1],
-                ) {
-                    rows.sort_by(|(i, a), (j, b)| {
-                        let order = match column {
-                            0 => i.cmp(j),
-                            1 => a.name.cmp(&b.name),
-                            2 => a.util.total_cmp(&b.util),
-                            4 => a.mem_used.cmp(&b.mem_used),
-                            5 => a.temp.unwrap_or(0.0).total_cmp(&b.temp.unwrap_or(0.0)),
-                            _ => a.power.unwrap_or(0.0).total_cmp(&b.power.unwrap_or(0.0)),
-                        };
-                        w::directed(order, descending)
-                    });
-                }
-                for (i, g) in rows {
-                    ui.label(i.to_string());
-                    ui.label(RichText::new(&g.name).strong());
-                    ui.label(format!("{:.0}%", g.util));
-                    w::bar(ui, g.util / 100.0, 160.0, w::SERIES[i % w::SERIES.len()]);
-                    if g.mem_total > 0 {
-                        ui.label(format!("{} of {}", fmt_bytes(g.mem_used), fmt_bytes(g.mem_total)));
-                    } else {
-                        ui.label(format!("{} (shared)", fmt_bytes(g.mem_used)));
-                    }
-                    ui.label(g.temp.map(|t| format!("{t:.0} °C")).unwrap_or("–".into()));
-                    ui.label(g.power.map(|p| format!("{p:.1} W")).unwrap_or("–".into()));
-                    ui.end_row();
-                }
+        let mut rows: Vec<(usize, &Gpu)> = s.gpus.iter().enumerate().collect();
+        if let Some((column, descending)) = w::sort_choice(ui, "gpus") {
+            rows.sort_by(|(i, a), (j, b)| {
+                let order = match column {
+                    0 => i.cmp(j),
+                    1 => a.name.cmp(&b.name),
+                    2 | 3 => a.util.total_cmp(&b.util),
+                    4 => a.mem_used.cmp(&b.mem_used),
+                    5 => a.temp.unwrap_or(0.0).total_cmp(&b.temp.unwrap_or(0.0)),
+                    _ => a.power.unwrap_or(0.0).total_cmp(&b.power.unwrap_or(0.0)),
+                };
+                w::directed(order, descending)
             });
+        }
+        let heads = ["#", "Name", "Load", "", "Memory", "Temperature", "Power"];
+        w::table(ui, "gpus", &heads, &[0, 1], rows.len(), |row, c| {
+            let (i, g) = rows[row];
+            c.text(i.to_string());
+            c.text(RichText::new(&g.name).strong());
+            c.text(format!("{:.0}%", g.util));
+            c.cell(|ui| w::bar(ui, g.util / 100.0, 160.0, w::SERIES[i % w::SERIES.len()]));
+            c.text(if g.mem_total > 0 {
+                format!("{} of {}", fmt_bytes(g.mem_used), fmt_bytes(g.mem_total))
+            } else {
+                format!("{} (shared)", fmt_bytes(g.mem_used))
+            });
+            c.text(g.temp.map(|t| format!("{t:.0} °C")).unwrap_or("–".into()));
+            c.text(g.power.map(|p| format!("{p:.1} W")).unwrap_or("–".into()));
+        });
     });
 }
 
@@ -2297,57 +2249,53 @@ fn docker_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64), s
 }
 
 fn container_table(ui: &mut Ui, rows: &[&Container], s: &Sample) {
-    egui::Grid::new("containers")
-        .num_columns(9)
-        .striped(true)
-        .spacing([18.0, 8.0])
-        .show(ui, |ui| {
-            let mut rows = rows.to_vec();
-            let heads = [
-                "State", "Name", "Image", "CPU", "Memory", "", "Net I/O", "PIDs", "Status",
-            ];
-            if let Some((column, descending)) = w::sort_header(ui, "containers", &heads, &[0, 1, 2, 6, 8]) {
-                rows.sort_by(|a, b| {
-                    let order = match column {
-                        0 => container_status(a).1.cmp(container_status(b).1),
-                        1 => a.name.cmp(&b.name),
-                        2 => a.image.cmp(&b.image),
-                        3 => a.cpu.total_cmp(&b.cpu),
-                        4 => a.mem_used.cmp(&b.mem_used),
-                        6 => a.net.cmp(&b.net),
-                        7 => a.pids.cmp(&b.pids),
-                        _ => a.status.cmp(&b.status),
-                    };
-                    w::directed(order, descending)
-                });
-            }
-            for c in &rows {
-                let (color, label) = container_status(c);
-                w::status(ui, color, label);
-                ui.label(RichText::new(&c.name).strong());
-                let image: String = c.image.chars().take(36).collect();
-                ui.label(w::muted(image)).on_hover_text(&c.image);
-                if c.has_stats {
-                    ui.label(format!("{:.1}%", c.cpu));
-                    let limited = c.mem_limit > 0 && c.mem_limit < s.mem_total.saturating_sub(s.mem_total / 20);
-                    if limited {
-                        ui.label(format!("{} / {}", fmt_bytes(c.mem_used), fmt_bytes(c.mem_limit)));
-                        w::meter(ui, c.mem_used as f32 / c.mem_limit as f32, 80.0);
-                    } else {
-                        ui.label(fmt_bytes(c.mem_used));
-                        ui.label(w::muted("no limit"));
-                    }
-                    ui.label(w::muted(&c.net));
-                    ui.label(c.pids.to_string());
-                } else {
-                    for _ in 0..5 {
-                        ui.label(w::muted("–"));
-                    }
-                }
-                ui.label(w::muted(&c.status));
-                ui.end_row();
-            }
+    let mut rows = rows.to_vec();
+    if let Some((column, descending)) = w::sort_choice(ui, "containers") {
+        rows.sort_by(|a, b| {
+            let order = match column {
+                0 => container_status(a).1.cmp(container_status(b).1),
+                1 => a.name.cmp(&b.name),
+                2 => a.image.cmp(&b.image),
+                3 => a.cpu.total_cmp(&b.cpu),
+                4 | 5 => a.mem_used.cmp(&b.mem_used),
+                6 => a.net.cmp(&b.net),
+                7 => a.pids.cmp(&b.pids),
+                _ => a.status.cmp(&b.status),
+            };
+            w::directed(order, descending)
         });
+    }
+    let heads = [
+        "State", "Name", "Image", "CPU", "Memory", "", "Net I/O", "PIDs", "Status",
+    ];
+    w::table(ui, "containers", &heads, &[0, 1, 2, 6, 8], rows.len(), |i, c| {
+        let container = rows[i];
+        let (color, label) = container_status(container);
+        c.cell(|ui| w::status(ui, color, label));
+        c.text(RichText::new(&container.name).strong());
+        c.cell(|ui| {
+            let image: String = container.image.chars().take(36).collect();
+            ui.label(w::muted(image)).on_hover_text(&container.image);
+        });
+        if container.has_stats {
+            c.text(format!("{:.1}%", container.cpu));
+            let limit = container.mem_limit;
+            if limit > 0 && limit < s.mem_total.saturating_sub(s.mem_total / 20) {
+                c.text(format!("{} / {}", fmt_bytes(container.mem_used), fmt_bytes(limit)));
+                c.cell(|ui| w::meter(ui, container.mem_used as f32 / limit as f32, 80.0));
+            } else {
+                c.text(fmt_bytes(container.mem_used));
+                c.text(w::muted("no limit"));
+            }
+            c.text(w::muted(&container.net));
+            c.text(container.pids.to_string());
+        } else {
+            for _ in 0..5 {
+                c.text(w::muted("–"));
+            }
+        }
+        c.text(w::muted(&container.status));
+    });
 }
 
 fn suggestions_tab(ui: &mut Ui, suggestions: &[Suggestion]) {
