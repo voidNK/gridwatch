@@ -174,6 +174,56 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
         }
     }
 
+    // Disks and GPUs have their own limits; mainboard inputs are too unreliable to judge.
+    for sensor in s.sensors.iter().filter(|x| matches!(x.kind(), SensorKind::Disk | SensorKind::Gpu)) {
+        let (warm, hot) = sensor.limits();
+        if sensor.temp >= warm {
+            let disk = sensor.kind() == SensorKind::Disk;
+            add(
+                if sensor.temp >= hot { Critical } else { Warning },
+                format!("{} {} is at {:.0} °C", if disk { "Disk" } else { "GPU" }, sensor.chip, sensor.temp),
+                if disk {
+                    format!("Drives age quickly above {warm:.0} °C and may throttle or fail above {hot:.0} °C.")
+                } else {
+                    format!("{} will throttle above {hot:.0} °C.", if sensor.label.is_empty() { "The GPU" } else { sensor.label.as_str() })
+                },
+                "Improve the airflow around it; check fans and dust.",
+            );
+        }
+    }
+
+    let util_avg = {
+        let utils: Vec<f32> = recent.iter().filter_map(|p| p.disk_util).collect();
+        (!utils.is_empty()).then(|| utils.iter().sum::<f32>() / utils.len() as f32)
+    };
+    if let Some(util) = util_avg.filter(|u| *u > 85.0) {
+        let busiest = s.disk_io.iter().max_by(|a, b| a.util.unwrap_or(0.0).total_cmp(&b.util.unwrap_or(0.0)));
+        let (name, detail) = match busiest {
+            Some(d) => (
+                d.name.clone(),
+                format!("Right now it reads {} and writes {} with {:.0} operations per second.", fmt_bytes_rate(d.read_bps), fmt_bytes_rate(d.write_bps), d.iops),
+            ),
+            None => ("A disk".to_string(), String::new()),
+        };
+        add(
+            Warning,
+            format!("Disk {name} is saturated: busy {util:.0}% of the time"),
+            format!("Requests queue up behind each other, so everything that touches this disk slows down. {detail}"),
+            "Find the process with `iotop -o`, spread the load over more disks or move to faster storage.",
+        );
+    }
+
+    for (i, gpu) in s.gpus.iter().enumerate() {
+        if gpu.mem_total > 0 && gpu.mem_used as f64 > gpu.mem_total as f64 * 0.95 {
+            add(
+                Info,
+                format!("GPU {i} memory is almost full"),
+                format!("{} uses {} of {}; the next allocation may fail.", gpu.name, fmt_bytes(gpu.mem_used), fmt_bytes(gpu.mem_total)),
+                "See which process holds the memory with `nvidia-smi`.",
+            );
+        }
+    }
+
     if s.zombies > 0 {
         add(
             if s.zombies >= 10 { Warning } else { Info },
@@ -362,4 +412,31 @@ mod tests {
         assert_eq!(list.last().unwrap().severity, Severity::Info);
         assert_eq!(alert_count(&list), 3);
     }
+
+    #[test]
+    fn flags_disks_and_gpus() {
+        let mut state = healthy();
+        let s = state.latest.as_mut().unwrap();
+        s.sensors = vec![
+            Sensor { chip: "nvme".into(), label: "Composite".into(), temp: 74.0 },
+            Sensor { chip: "drivetemp".into(), label: String::new(), temp: 61.0 },
+            Sensor { chip: "nct6779".into(), label: "AUXTIN3".into(), temp: 120.0 },
+            Sensor { chip: "GPU 0".into(), label: "RTX".into(), temp: 70.0 },
+        ];
+        s.disk_io = vec![DiskIo { name: "sda".into(), util: Some(99.0), ..Default::default() }];
+        s.gpus = vec![Gpu { name: "RTX".into(), mem_used: 97, mem_total: 100, ..Default::default() }];
+        state.history.push_back(HistPoint { ts: 990, disk_util: Some(96.0), ..Default::default() });
+        let list = analyze(&state);
+        let titles: Vec<(Severity, &str)> = list.iter().map(|s| (s.severity, s.title.as_str())).collect();
+        assert_eq!(
+            titles,
+            vec![
+                (Severity::Critical, "Disk drivetemp is at 61 °C"),
+                (Severity::Warning, "Disk nvme is at 74 °C"),
+                (Severity::Warning, "Disk sda is saturated: busy 96% of the time"),
+                (Severity::Info, "GPU 0 memory is almost full"),
+            ]
+        );
+    }
+
 }

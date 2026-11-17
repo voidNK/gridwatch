@@ -1,0 +1,38 @@
+# Changelog
+
+The version is raised with every change that reaches users: the last number for a fix,
+the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
+and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
+
+## 0.3.0
+
+- **This computer** is listed as the first server: read through the Windows API on Windows,
+  through the same scripts as remote machines on Linux and macOS. It can be hidden in the settings.
+- **WSL**: the default Linux distribution of a Windows computer can be listed as well (settings, off by default).
+- **Network tab**: received and sent traffic for every interface, with charts and totals.
+- **Disks tab**: read and write transfer per disk, operations per second and the share of time a disk is busy.
+- **Temperatures tab**: every sensor the machine exposes (CPU, GPU, NVMe and SATA disks, mainboard),
+  with a chart per chip. On a Mac the values come from `macmon` when it is installed.
+- **GPU tab**: load, memory, temperature and power for NVIDIA GPUs (`nvidia-smi`), AMD GPUs (`amdgpu`)
+  and Apple Silicon (`macmon`). Shown only on machines that have a GPU.
+- **Passwords** and key passphrases can be kept in the keychain of the operating system
+  (Windows Credential Manager, macOS Keychain, Secret Service on Linux), so they are asked for only once.
+- **Server list**: drag a server to a new place to change the order.
+- New suggestions: saturated disk, hot disk, hot GPU, full GPU memory.
+- The version number is shown in the top bar; `--version` prints it.
+- GitHub Actions build and test on Windows, Linux and macOS, and publish a release for every version tag.
+- Fixed: the temperature shown for a machine is now the CPU sensor, not the hottest sensor of any kind
+  (mainboard inputs that are not connected often report nonsense).
+
+## 0.2.0
+
+- Alerts: a sound and a desktop notification when a server gets into trouble or cannot be reached,
+  with a switch in the top bar.
+- Settings window: volume, which problems to alert on, reminders, refresh interval, history retention.
+- macOS machines can be monitored, including usage per core.
+- Docker is also found in `/usr/local/bin` and `/opt/homebrew/bin`.
+
+## 0.1.0
+
+- First version: servers over SSH with tabs for overview, CPU, cores, processes, docker and suggestions,
+  charts from 5 minutes to 7 days, history in SQLite.

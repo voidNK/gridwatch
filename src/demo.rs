@@ -17,6 +17,10 @@ struct Profile {
     mem_pct: f64,
     temp: f32,
     zombies: usize,
+    /// device, share of the activity that reaches it (1.0 = saturated), sensor chip, temperature
+    drives: &'static [(&'static str, f64, &'static str, f32)],
+    /// name, memory in GiB
+    gpu: Option<(&'static str, u64)>,
     disks: &'static [(&'static str, &'static str, u64, f64)],
     procs: &'static [(&'static str, &'static str, f64, f64)],
     /// name, image, state, status, cpu share, memory MiB, limit MiB (0 = none)
@@ -35,6 +39,8 @@ const PROFILES: [Profile; 3] = [
         mem_pct: 46.0,
         temp: 52.0,
         zombies: 0,
+        drives: &[("nvme0n1", 0.12, "nvme", 39.0), ("nvme1n1", 0.22, "nvme #2", 43.0)],
+        gpu: None,
         disks: &[("/", "ext4", 80, 52.0), ("/var/lib/docker", "xfs", 200, 61.0)],
         procs: &[
             ("www-data", "nginx: worker process", 0.22, 0.6),
@@ -67,6 +73,8 @@ const PROFILES: [Profile; 3] = [
         mem_pct: 92.5,
         temp: 61.0,
         zombies: 0,
+        drives: &[("nvme0n1", 0.08, "nvme", 44.0), ("sda", 0.88, "drivetemp", 47.0), ("sdb", 0.55, "drivetemp #2", 52.0)],
+        gpu: None,
         disks: &[("/", "ext4", 100, 38.0), ("/var/lib/postgresql", "xfs", 1800, 88.0)],
         procs: &[
             ("postgres", "postgres: checkpointer", 0.12, 20.5),
@@ -90,6 +98,8 @@ const PROFILES: [Profile; 3] = [
         mem_pct: 71.0,
         temp: 84.0,
         zombies: 3,
+        drives: &[("nvme0n1", 0.35, "nvme", 58.0)],
+        gpu: Some(("NVIDIA RTX A4000", 16)),
         disks: &[("/", "ext4", 120, 96.0)],
         procs: &[
             ("runner", "rustc --crate-name app --edition=2024 src/main.rs -C opt-level=3", 0.38, 14.0),
@@ -119,6 +129,7 @@ pub fn servers() -> Vec<ServerConfig> {
             port: 22,
             user: "monitor".to_string(),
             auth: AuthMethod::Auto,
+            kind: ServerKind::Ssh,
         })
         .collect()
 }
@@ -176,6 +187,69 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
         })
         .collect();
 
+    let cpu_temp = p.temp + (total as f32 - p.cpu_base as f32) * 0.25;
+    let mut sensors = vec![
+        Sensor { chip: "k10temp".into(), label: "Tctl".into(), temp: cpu_temp },
+        Sensor { chip: "k10temp".into(), label: "Tccd1".into(), temp: cpu_temp - 3.5 },
+        Sensor { chip: "acpitz".into(), label: String::new(), temp: 34.0 + 2.0 * wave(t, 3000.0, 0.4) as f32 },
+    ];
+    let disk_io: Vec<DiskIo> = p
+        .drives
+        .iter()
+        .enumerate()
+        .map(|(i, (name, share, chip, temp))| {
+            let busy = (share * (1.0 + 0.25 * wave(t, 380.0 + 90.0 * i as f64, i as f64 * 0.3) + 0.1 * noise(seed + 30 + i as u64, ts))).clamp(0.01, 1.0);
+            sensors.push(Sensor {
+                chip: chip.to_string(),
+                label: if chip.starts_with("nvme") { "Composite".into() } else { String::new() },
+                temp: temp + 4.0 * busy as f32 + wave(t, 2000.0, i as f64 * 0.2) as f32,
+            });
+            // Spinning disks do far less work for the same share of busy time.
+            let speed = if name.starts_with("nvme") { 900e6 } else { 160e6 };
+            DiskIo {
+                name: name.to_string(),
+                read_bps: speed * busy * 0.6,
+                write_bps: speed * busy * 0.3 * (1.0 + 0.3 * wave(t, 240.0, i as f64 * 0.5)),
+                iops: busy * if name.starts_with("nvme") { 22_000.0 } else { 190.0 },
+                util: Some((busy * 100.0) as f32),
+            }
+        })
+        .collect();
+    let gpus: Vec<Gpu> = p
+        .gpu
+        .iter()
+        .map(|(name, gb)| {
+            let util = (62.0 + 30.0 * wave(t, 520.0, 0.2) + 6.0 * noise(seed + 40, ts)).clamp(0.0, 100.0);
+            let temp = 58.0 + util as f32 * 0.2;
+            sensors.push(Sensor { chip: "GPU 0".into(), label: name.to_string(), temp });
+            Gpu {
+                name: name.to_string(),
+                util: util as f32,
+                mem_used: ((gb << 30) as f64 * (0.55 + 0.25 * wave(t, 1700.0, 0.6))) as u64,
+                mem_total: gb << 30,
+                temp: Some(temp),
+                power: Some(35.0 + util as f32 * 1.05),
+            }
+        })
+        .collect();
+
+    let (rx, tx) = (2.4e6 * traffic * (1.0 + 0.2 * noise(seed + 3, ts)), 6.1e6 * traffic * (1.0 + 0.2 * noise(seed + 4, ts)));
+    // Two ports share the traffic; the bridge repeats what the containers send.
+    let backup = 0.18 + 0.1 * wave(t, 700.0, 0.3);
+    let since_boot = |bps: f64| (bps * (40.0 * 86400.0 + (ts % 86400) as f64) * 0.7) as u64;
+    let iface = |name: &str, share: f64, physical: bool| NetIface {
+        name: name.to_string(),
+        rx_bps: rx * share,
+        tx_bps: tx * share,
+        rx_total: since_boot(2.4e6 * share),
+        tx_total: since_boot(6.1e6 * share),
+        physical,
+    };
+    let mut net = vec![iface("eth0", 1.0 - backup, true), iface("eth1", backup, true), iface("lo", 0.04, false)];
+    if !p.containers.is_empty() {
+        net.push(iface("docker0", 0.55, false));
+    }
+
     let sample = Sample {
         ts,
         cpu: CpuUsage {
@@ -196,8 +270,9 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
         mem_used: (mem_total as f64 * mem_pct / 100.0) as u64,
         swap_total: 4 << 30,
         swap_used: if p.mem_pct > 90.0 { 2600 << 20 } else { 64 << 20 },
-        rx_bps: 2.4e6 * traffic * (1.0 + 0.2 * noise(seed + 3, ts)),
-        tx_bps: 6.1e6 * traffic * (1.0 + 0.2 * noise(seed + 4, ts)),
+        rx_bps: rx,
+        tx_bps: tx,
+        net,
         disks: p
             .disks
             .iter()
@@ -208,7 +283,10 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
                 used: ((gb << 30) as f64 * pct / 100.0) as u64,
             })
             .collect(),
-        temp: Some(p.temp + (total as f32 - p.cpu_base as f32) * 0.25),
+        disk_io,
+        temp: Some(cpu_temp),
+        sensors,
+        gpus,
         uptime: 40 * 86400 + (ts % 86400) as u64,
         proc_count: 140 + profile * 35,
         zombies: p.zombies,
@@ -219,6 +297,8 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
             cpu_model: "AMD EPYC 7543P 32-Core Processor".into(),
             reboot_required: profile == 2,
             no_per_core: false,
+            is_mac: false,
+            is_local_windows: false,
         },
     };
 

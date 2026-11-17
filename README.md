@@ -1,27 +1,34 @@
 # gridwatch
 
-A desktop dashboard for Windows, Linux and macOS that watches Linux and macOS machines over SSH.
-Nothing is installed on the monitored machines: gridwatch logs in, reads `/proc` (or `sysctl` and
-`vm_stat` on a Mac), `df`, `ps` and the docker CLI, and draws the result.
+A desktop dashboard for Windows, Linux and macOS that watches Linux and macOS machines over SSH,
+and the computer it runs on. Nothing is installed on the monitored machines: gridwatch logs in,
+reads `/proc` (or `sysctl` and `vm_stat` on a Mac), `df`, `ps` and the docker CLI, and draws the result.
 
 ![Overview](docs/screenshots/overview.png)
 
 ## Features
 
 - **Several servers at once** - every server has its own connection and reconnects on its own;
-  the sidebar shows state, CPU, memory and the number of open alerts for each.
+  the sidebar shows state, CPU, memory and the number of open alerts for each. Drag a server to
+  change the order.
+- **This computer** is the first entry, without any connection. On Windows the default WSL
+  distribution can be listed too.
 - **Tabs per server**
   - **Overview** - CPU, memory, load, network, disks and containers at a glance
   - **CPU** - time split into user / system / I/O wait / steal, load average, temperature
   - **Cores** - one chart per core, plus clock frequency
   - **Processes** - live CPU per process (measured between two polls, not the lifetime average `ps` prints), filter and sort
+  - **Network** - received and sent traffic per interface, with totals since the interface came up
+  - **Disks** - read and write transfer per disk, operations per second, share of time busy, filesystems
+  - **Temperatures** - every sensor: CPU, GPU, NVMe and SATA disks, mainboard
+  - **GPU** - load, memory, temperature and power (only on machines that have one)
   - **Docker** - state, CPU, memory, limits and network I/O of every container, with charts for the heaviest ones
   - **Suggestions** - plain-language findings with a concrete next step
 - **History saved locally** in SQLite. Charts cover 5 minutes to 7 days and survive a restart;
   data older than 14 days is pruned.
 - **Suggestions** for saturated CPU, load above core count, I/O wait, CPU steal, memory and swap
-  pressure, full disks, high temperature, zombie processes, pending reboots, containers that
-  restart, fail, are unhealthy, run without or close to their memory limit, and more.
+  pressure, full or saturated disks, hot CPUs, disks and GPUs, zombie processes, pending reboots,
+  containers that restart, fail, are unhealthy, run without or close to their memory limit, and more.
 - **Alerts** - a sound and a desktop notification (Windows, macOS, Linux) when a server gets into
   trouble or cannot be reached. One click on the bell in the top bar switches them off and on.
 
@@ -29,9 +36,17 @@ Nothing is installed on the monitored machines: gridwatch logs in, reads `/proc`
 | --- | --- |
 | ![CPU](docs/screenshots/cpu.png) | ![Cores](docs/screenshots/cores.png) |
 
-| Processes | Docker |
+| Processes | Network |
 | --- | --- |
-| ![Processes](docs/screenshots/processes.png) | ![Docker](docs/screenshots/docker.png) |
+| ![Processes](docs/screenshots/processes.png) | ![Network](docs/screenshots/network.png) |
+
+| Disks | Temperatures |
+| --- | --- |
+| ![Disks](docs/screenshots/disks.png) | ![Temperatures](docs/screenshots/temperatures.png) |
+
+| GPU | Docker |
+| --- | --- |
+| ![GPU](docs/screenshots/gpu.png) | ![Docker](docs/screenshots/docker.png) |
 
 ![Suggestions](docs/screenshots/suggestions.png)
 
@@ -53,9 +68,17 @@ minimised. The **Alerts on / off** button in the top bar is the master switch. *
 | Server unreachable | alert when the SSH connection is lost or cannot be made |
 | Remind me | repeat the alert every 5 to 60 minutes while problems stay open |
 | Refresh every, Keep history for | poll interval and how long history stays in the database |
+| Show this computer | list the computer gridwatch runs on |
+| Show its Linux (WSL) | Windows only: list the default WSL distribution. Watching it keeps WSL running |
+| Save passwords in the system keychain | see below |
 
 On Windows the notification is shown under the name of Windows PowerShell, because gridwatch
 has no installer that could register its own name.
+
+## Download
+
+Every version is built for Windows, Linux and macOS by GitHub Actions and published on the
+**Releases** page of the repository. Unpack the archive and start `gridwatch`.
 
 ## Build and run
 
@@ -79,6 +102,7 @@ cargo run --release -- --demo
 | `--demo` | simulated servers; nothing is read from or written to disk |
 | `--screenshot <DIR>` | save a PNG of every tab into `DIR`, then exit |
 | `--delay <SECONDS>` | wait for data before the first screenshot |
+| `--version` | print the version |
 
 ## Adding a server
 
@@ -90,8 +114,12 @@ Click **+ Add server** and enter the host (or `user@host`). Three ways to authen
 | Key file | a specific private key; the passphrase is asked for if the key is encrypted |
 | Password | asked for on connect |
 
-Passwords and passphrases are kept in memory only and are never written to disk, so they have to
-be entered again after a restart. Key or agent authentication avoids that.
+**Passwords and passphrases** are never written to a file by gridwatch. With *Save passwords in
+the system keychain* switched on (the default) they are handed to the keychain of the operating
+system - Windows Credential Manager, macOS Keychain, or the Secret Service on Linux (GNOME Keyring,
+KWallet) - and read from there at the next start. Switch it off and they are kept in memory only,
+removed from the keychain, and asked for again after every restart. Removing a server removes its
+entry.
 
 **Host keys** are checked against `~/.ssh/known_hosts` first. A host that is not known yet is
 trusted on first use and recorded in gridwatch's own `known_hosts` file. If a host key ever
@@ -107,31 +135,54 @@ The remote user needs no special rights. To see containers it must be allowed to
 | Config (`config.json`) | `%APPDATA%\gridwatch\config` | `~/.config/gridwatch` | `~/Library/Application Support/gridwatch` |
 | History (`history.sqlite`), `known_hosts` | `%APPDATA%\gridwatch\data` | `~/.local/share/gridwatch` | `~/Library/Application Support/gridwatch` |
 
-## Requirements on the monitored machine
+## What a machine has to offer
 
-**Linux** with `/proc`, a POSIX `sh`, `df` and procps `ps`. Per-core frequency and temperature
-are shown when the kernel exposes them (`/proc/cpuinfo`, `/sys/class/thermal`).
+| | Linux | macOS | This computer on Windows |
+| --- | --- | --- | --- |
+| CPU, memory, processes, network, filesystems | `/proc`, `df`, procps `ps` | `sysctl`, `vm_stat`, `netstat`, `df`, `ps` | Windows API |
+| Usage per core | yes | needs `python3` (Xcode command line tools or Homebrew) | yes |
+| I/O wait, load average | yes | load only | no |
+| Disk transfer | per disk, with busy time | per disk | per volume |
+| Temperatures | `hwmon` and thermal zones; SATA disks need `sudo modprobe drivetemp` | needs `macmon` (`brew install macmon`) | no |
+| GPU | `nvidia-smi`, `amdgpu` | `macmon` | `nvidia-smi` |
+| Docker | `docker` CLI | `docker` in `/usr/local/bin` or `/opt/homebrew/bin` | `docker` CLI (Docker Desktop) |
 
-**macOS** with Remote Login enabled (System Settings > General > Sharing). Usage per core is read
-through `python3`, which comes with the Xcode command line tools (`xcode-select --install`) or
-Homebrew; without it only the total CPU usage is shown. macOS does not expose temperature, clock
-frequency or I/O wait to an ordinary user, so those stay empty. Docker is found in
-`/usr/local/bin` and `/opt/homebrew/bin` and needs Docker Desktop (or another daemon) running.
+A Mac needs Remote Login enabled (System Settings > General > Sharing). A POSIX `sh` is all that
+is required of the login shell.
+
+## Versions and releases
+
+The version lives in `Cargo.toml`, is shown in the top bar, and is raised with every fix (last
+number) or feature (middle number); [CHANGELOG.md](CHANGELOG.md) says what changed. To publish:
+
+```sh
+git tag v0.3.0 && git push origin v0.3.0
+```
+
+The `Release` workflow checks that the tag matches `Cargo.toml`, builds for Windows, Linux and
+macOS (Apple Silicon and Intel) and attaches the archives to a GitHub release with the notes of
+that version. The `CI` workflow builds and tests every push and pull request on all three systems.
 
 ## Development
 
 ```sh
 cargo test      # parsers, history store, suggestion and alert rules
-GRIDWATCH_TEST_HOST=user@host cargo test live_host -- --ignored --nocapture   # poll a real machine once
 cargo run -- --demo --screenshot docs/screenshots --delay 2   # regenerate the screenshots
+
+# tests that touch the real world, run on request
+GRIDWATCH_TEST_HOST=user@host cargo test live_host -- --ignored --nocapture   # poll a machine over ssh
+cargo test local_shell -- --ignored --nocapture                               # poll this computer (WSL on Windows)
+cargo test keychain -- --ignored                                              # write to and read from the keychain
 ```
 
 | File | Purpose |
 | --- | --- |
 | `src/ssh.rs` | connection, host key check, authentication (russh) |
-| `src/parse.rs` | the remote scripts and the parsers for their output |
-| `src/collector.rs` | one polling task per server |
+| `src/parse.rs` | the collection scripts and the parsers for their output |
+| `src/collector.rs` | one polling task per server: SSH, local shell, WSL |
+| `src/local_windows.rs` | this computer on Windows, through the Windows API |
 | `src/store.rs` | SQLite history and the config file |
+| `src/secrets.rs` | passwords in the system keychain |
 | `src/suggest.rs` | suggestion rules |
 | `src/notify.rs` | alert sound and desktop notifications |
 | `src/app.rs`, `src/widgets.rs` | the egui user interface |

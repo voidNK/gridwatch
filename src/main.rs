@@ -5,9 +5,12 @@
 mod app;
 mod collector;
 mod demo;
+#[cfg(windows)]
+mod local_windows;
 mod model;
 mod notify;
 mod parse;
+mod secrets;
 mod ssh;
 mod store;
 mod suggest;
@@ -38,6 +41,7 @@ USAGE: gridwatch [OPTIONS]
   --demo               show simulated servers (no SSH connection, nothing is saved)
   --screenshot <DIR>   save a PNG of every tab into DIR, then exit
   --delay <SECONDS>    wait this long for data before the first screenshot
+  -V, --version        print the version
   -h, --help           print this help";
 
 fn parse_args() -> Result<Args, String> {
@@ -56,6 +60,7 @@ fn parse_args() -> Result<Args, String> {
                     .and_then(|v| v.parse().ok())
                     .ok_or("--delay needs a number of seconds")?;
             }
+            "-V" | "--version" => return Err(concat!("gridwatch ", env!("CARGO_PKG_VERSION")).to_string()),
             "-h" | "--help" => return Err(HELP.to_string()),
             other => return Err(format!("unknown option {other}\n\n{HELP}")),
         }

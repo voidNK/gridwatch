@@ -173,6 +173,10 @@ pub fn fmt_gib(v: f64) -> String {
     if v >= 10.0 { format!("{v:.0} GiB") } else { format!("{v:.1} GiB") }
 }
 
+pub fn fmt_mib_s(v: f64) -> String {
+    if v >= 10.0 { format!("{v:.0} MiB/s") } else { format!("{v:.1} MiB/s") }
+}
+
 pub fn fmt_mbit(v: f64) -> String {
     if v >= 10.0 { format!("{v:.0} Mbit/s") } else { format!("{v:.1} Mbit/s") }
 }

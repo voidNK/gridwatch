@@ -6,7 +6,7 @@ use crate::notify::Notifier;
 use crate::store::{Config, Notifications, Paths, Store};
 use crate::suggest::{self, Severity, Suggestion};
 use crate::widgets::{self as w, ChartOptions, Series};
-use crate::{Args, demo, now_ts};
+use crate::{Args, demo, now_ts, secrets};
 use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, ScrollArea, Sense, Ui};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,6 +35,10 @@ enum Tab {
     Cpu,
     Cores,
     Processes,
+    Network,
+    Disks,
+    Temps,
+    Gpu,
     Docker,
     Suggestions,
 }
@@ -84,6 +88,8 @@ pub struct App {
     tab: Tab,
     range: usize,
     dialog: Option<Dialog>,
+    /// Index of the server card being dragged to a new place in the list.
+    dragging: Option<usize>,
     settings_open: bool,
     confirm_remove: bool,
     secret_input: String,
@@ -124,6 +130,8 @@ impl App {
         });
         let _ = env.store.prune(config.retention_days, now_ts());
 
+        // In the demo each tab is shown on the server where it has the most to tell.
+        let pick = |demo_server: usize| if args.demo { demo_server } else { 0 };
         let screenshots = args.screenshot_dir.map(|dir| Screenshots {
             dir,
             shots: vec![
@@ -131,8 +139,12 @@ impl App {
                 (0, Tab::Cpu, "cpu.png"),
                 (0, Tab::Cores, "cores.png"),
                 (0, Tab::Processes, "processes.png"),
+                (0, Tab::Network, "network.png"),
+                (pick(1), Tab::Disks, "disks.png"),
+                (pick(1), Tab::Temps, "temperatures.png"),
+                (pick(2), Tab::Gpu, "gpu.png"),
                 (0, Tab::Docker, "docker.png"),
-                (if args.demo { 2 } else { 0 }, Tab::Suggestions, "suggestions.png"),
+                (pick(2), Tab::Suggestions, "suggestions.png"),
                 (0, Tab::Overview, SETTINGS_SHOT),
             ],
             index: 0,
@@ -153,6 +165,7 @@ impl App {
             tab: Tab::Overview,
             range,
             dialog: None,
+            dragging: None,
             settings_open: false,
             confirm_remove: false,
             secret_input: String::new(),
@@ -162,9 +175,30 @@ impl App {
             screenshots,
             config,
         };
+        if !app.is_demo() {
+            if !cfg!(windows) {
+                app.config.show_wsl = false;
+            }
+            let (local, wsl) = (app.config.show_local, app.config.show_wsl);
+            app.config.servers.retain(|s| match s.kind {
+                ServerKind::Local => local,
+                ServerKind::Wsl => wsl,
+                ServerKind::Ssh => true,
+            });
+            if app.config.remember_secrets {
+                for cfg in app.config.servers.iter().filter(|c| c.kind == ServerKind::Ssh && c.auth != AuthMethod::Auto) {
+                    if let Some(secret) = secrets::load(&cfg.id) {
+                        app.secrets.insert(cfg.id.clone(), secret);
+                    }
+                }
+            }
+        }
         for (i, cfg) in app.config.servers.clone().into_iter().enumerate() {
             let server = app.start(cfg, i);
             app.servers.push(server);
+        }
+        if !app.is_demo() {
+            app.apply_builtin();
         }
         Ok(app)
     }
@@ -178,6 +212,9 @@ impl App {
         let shared: Shared = Arc::new(Mutex::new(ServerState::default()));
         let task = if self.is_demo() {
             collector::spawn_demo(self.rt.handle(), cfg.clone(), index, shared.clone(), self.env.clone())
+        } else if cfg.kind != ServerKind::Ssh {
+            self.load_history(&cfg.id, &shared);
+            collector::spawn_local(self.rt.handle(), cfg.clone(), shared.clone(), self.env.clone())
         } else {
             self.load_history(&cfg.id, &shared);
             let secret = self.secrets.get(&cfg.id).cloned();
@@ -226,13 +263,73 @@ impl App {
     }
 
     fn remove_selected(&mut self) {
-        let server = self.servers.remove(self.selected);
-        server.task.abort();
-        let _ = self.env.store.delete_server(&server.cfg.id);
-        self.secrets.remove(&server.cfg.id);
-        self.env.notifier.forget(&server.cfg.id);
+        // This computer and WSL are only hidden; their history stays for when they come back.
+        match self.servers[self.selected].cfg.kind {
+            ServerKind::Local => self.config.show_local = false,
+            ServerKind::Wsl => self.config.show_wsl = false,
+            ServerKind::Ssh => {
+                let server = self.servers.remove(self.selected);
+                server.task.abort();
+                let _ = self.env.store.delete_server(&server.cfg.id);
+                self.secrets.remove(&server.cfg.id);
+                secrets::delete(&server.cfg.id);
+                self.env.notifier.forget(&server.cfg.id);
+                self.selected = self.selected.min(self.servers.len().saturating_sub(1));
+            }
+        }
+        self.apply_builtin();
+    }
+
+    /// Add or drop the entries for this computer and its WSL distribution, as chosen in the settings.
+    fn apply_builtin(&mut self) {
+        for (kind, wanted) in [(ServerKind::Local, self.config.show_local), (ServerKind::Wsl, self.config.show_wsl)] {
+            let position = self.servers.iter().position(|s| s.cfg.kind == kind);
+            match (position, wanted) {
+                (None, true) => {
+                    // This computer goes to the top, WSL right below it.
+                    let local = self.servers.iter().position(|s| s.cfg.kind == ServerKind::Local);
+                    let at = if kind == ServerKind::Local { 0 } else { local.map_or(0, |i| i + 1) };
+                    let server = self.start(ServerConfig::builtin(kind), at);
+                    if !self.servers.is_empty() && self.selected >= at {
+                        self.selected += 1;
+                    }
+                    self.servers.insert(at, server);
+                }
+                (Some(i), false) => {
+                    let server = self.servers.remove(i);
+                    server.task.abort();
+                    self.env.notifier.forget(&server.cfg.id);
+                    if self.selected > i {
+                        self.selected -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
         self.selected = self.selected.min(self.servers.len().saturating_sub(1));
         self.save_config();
+    }
+
+    /// Put the server at `from` in front of the card that is at `slot` now.
+    fn move_server(&mut self, from: usize, slot: usize) {
+        let to = if slot > from { slot - 1 } else { slot };
+        if from >= self.servers.len() || to >= self.servers.len() || to == from {
+            return;
+        }
+        let selected = self.servers[self.selected].cfg.id.clone();
+        let server = self.servers.remove(from);
+        self.servers.insert(to, server);
+        self.selected = self.servers.iter().position(|s| s.cfg.id == selected).unwrap_or(0);
+        self.save_config();
+    }
+
+    /// Keep a password or passphrase for the next start, if the user wants that.
+    fn remember(&self, server_id: &str, secret: &str) {
+        if !self.is_demo() && self.config.remember_secrets {
+            if let Err(e) = secrets::save(server_id, secret) {
+                eprintln!("gridwatch: cannot save the password in the system keychain: {e}");
+            }
+        }
     }
 
     fn open_dialog(&mut self, editing: Option<usize>) {
@@ -297,13 +394,15 @@ impl App {
         let editing = d.editing;
         let secret = std::mem::take(&mut d.secret);
         let id = editing.map(|i| self.servers[i].cfg.id.clone()).unwrap_or_else(ServerConfig::new_id);
-        let cfg = ServerConfig { id: id.clone(), name, host, port, user, auth };
+        let cfg = ServerConfig { id: id.clone(), name, host, port, user, auth, kind: ServerKind::Ssh };
 
         if secret.is_empty() {
             if editing.is_some_and(|i| self.servers[i].cfg.auth != cfg.auth) {
                 self.secrets.remove(&id);
+                secrets::delete(&id);
             }
         } else {
+            self.remember(&id, &secret);
             self.secrets.insert(id, secret);
         }
         match editing {
@@ -392,6 +491,7 @@ impl App {
     fn top_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("gridwatch").size(18.0).strong());
+            ui.label(w::muted(concat!("v", env!("CARGO_PKG_VERSION"))));
             if self.is_demo() {
                 ui.label(w::muted("demo data"));
             }
@@ -449,15 +549,30 @@ Click to switch on or off.");
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
-        ui.label(w::muted(format!("SERVERS ({})", self.servers.len())));
+        ui.horizontal(|ui| {
+            ui.label(w::muted(format!("SERVERS ({})", self.servers.len())));
+            if self.servers.len() > 1 {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(w::muted("drag to sort")));
+            }
+        });
         ui.add_space(2.0);
+        let mut clicked = None;
+        let mut dropped = None;
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let mut cards = Vec::new();
             for (i, server) in self.servers.iter().enumerate() {
                 let state = server.shared.lock().unwrap();
                 let selected = i == self.selected;
                 let alerts = suggest::alert_count(&suggest::analyze(&state));
+                let fill = if self.dragging == Some(i) {
+                    w::GRID
+                } else if selected {
+                    w::SURFACE
+                } else {
+                    w::PAGE
+                };
                 let response = Frame::new()
-                    .fill(if selected { w::SURFACE } else { w::PAGE })
+                    .fill(fill)
                     .stroke(egui::Stroke::new(1.0, if selected { w::AXIS } else { w::GRID }))
                     .corner_radius(CornerRadius::same(8))
                     .inner_margin(Margin::same(10))
@@ -486,14 +601,43 @@ Click to switch on or off.");
                         }
                     })
                     .response
-                    .interact(Sense::click());
+                    .interact(Sense::click_and_drag());
+                cards.push(response.rect);
                 if response.clicked() {
-                    self.selected = i;
-                    self.secret_input.clear();
+                    clicked = Some(i);
+                }
+                if response.drag_started() {
+                    self.dragging = Some(i);
                 }
                 ui.add_space(2.0);
             }
+
+            // While a card is dragged, a line shows where it would land.
+            if let (Some(from), Some(pointer)) = (self.dragging, ui.ctx().pointer_interact_pos()) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                let slot = cards.iter().filter(|card| card.center().y < pointer.y).count();
+                if slot != from && slot != from + 1 {
+                    let y = match cards.get(slot) {
+                        Some(card) => card.top() - 2.0,
+                        None => cards.last().map_or(0.0, |card| card.bottom() + 2.0),
+                    };
+                    ui.painter().hline(cards[0].x_range(), y, egui::Stroke::new(2.0, w::SERIES[0]));
+                }
+                if ui.input(|i| i.pointer.any_released()) {
+                    dropped = Some((from, slot));
+                }
+            }
         });
+        if !ui.input(|i| i.pointer.any_down()) {
+            self.dragging = None;
+        }
+        if let Some(i) = clicked {
+            self.selected = i;
+            self.secret_input.clear();
+        }
+        if let Some((from, slot)) = dropped {
+            self.move_server(from, slot);
+        }
     }
 
     fn central(&mut self, ui: &mut Ui) {
@@ -513,6 +657,9 @@ Click to switch on or off.");
         let now = now_ts();
         let range = (now - RANGES[self.range].1, now);
         let demo = self.is_demo();
+        let builtin = self.servers[index].cfg.kind != ServerKind::Ssh;
+        let remember = self.config.remember_secrets;
+        let mut hide = false;
         let mut edit = false;
         let mut reconnect = false;
 
@@ -527,7 +674,9 @@ Click to switch on or off.");
                 let (color, label) = conn_status(&state);
                 w::status(ui, color, label);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if !demo {
+                    if !demo && builtin {
+                        hide = ui.button("Hide").on_hover_text("Bring it back in Settings.").clicked();
+                    } else if !demo {
                         if ui.button("Remove").clicked() {
                             self.confirm_remove = true;
                         }
@@ -565,7 +714,11 @@ Click to switch on or off.");
                                 reconnect = true;
                             }
                         });
-                        ui.label(w::muted("Kept in memory until gridwatch is closed; never written to disk."));
+                        ui.label(w::muted(if remember {
+                            "Saved in the keychain of this computer, so it is asked for only once (see Settings)."
+                        } else {
+                            "Kept in memory until gridwatch is closed; never written to disk."
+                        }));
                     });
                 }
                 ConnState::Connecting if state.latest.is_none() => {
@@ -585,13 +738,24 @@ Click to switch on or off.");
                         (Tab::Cpu, "CPU".to_string()),
                         (Tab::Cores, format!("Cores ({})", sample.cores.len())),
                         (Tab::Processes, format!("Processes ({})", sample.proc_count)),
+                        (Tab::Network, "Network".to_string()),
+                        (Tab::Disks, "Disks".to_string()),
+                        (Tab::Temps, "Temperatures".to_string()),
+                        (Tab::Gpu, if sample.gpus.len() > 1 { format!("GPU ({})", sample.gpus.len()) } else { "GPU".to_string() }),
                         (Tab::Docker, "Docker".to_string()),
                         (Tab::Suggestions, if alerts > 0 { format!("Suggestions ({alerts})") } else { "Suggestions".to_string() }),
                     ] {
+                        // Only machines with a graphics card get the GPU tab.
+                        if tab == Tab::Gpu && sample.gpus.is_empty() {
+                            continue;
+                        }
                         ui.selectable_value(&mut self.tab, tab, label);
                     }
                 });
                 ui.add_space(4.0);
+                if self.tab == Tab::Gpu && sample.gpus.is_empty() {
+                    self.tab = Tab::Overview;
+                }
                 let tab = self.tab;
                 let (filter, by_memory) = (&mut self.proc_filter, &mut self.proc_by_memory);
                 let slots = &mut server.color_slots;
@@ -600,18 +764,29 @@ Click to switch on or off.");
                     Tab::Cpu => cpu_tab(ui, &state, sample, range),
                     Tab::Cores => cores_tab(ui, &state, sample, range),
                     Tab::Processes => processes_tab(ui, sample, filter, by_memory),
+                    Tab::Network => network_tab(ui, &state, sample, range),
+                    Tab::Disks => disks_tab(ui, &state, sample, range),
+                    Tab::Temps => temps_tab(ui, &state, sample, range),
+                    Tab::Gpu => gpu_tab(ui, &state, sample, range),
                     Tab::Docker => docker_tab(ui, &state, sample, range, slots),
                     Tab::Suggestions => suggestions_tab(ui, &suggestions),
                 });
             }
         }
 
+        if hide {
+            self.selected = index;
+            self.remove_selected();
+            return;
+        }
         if edit {
             self.open_dialog(Some(index));
         }
         if reconnect {
             let id = self.servers[index].cfg.id.clone();
-            self.secrets.insert(id, std::mem::take(&mut self.secret_input));
+            let secret = std::mem::take(&mut self.secret_input);
+            self.remember(&id, &secret);
+            self.secrets.insert(id, secret);
             self.restart(index);
         }
     }
@@ -653,7 +828,7 @@ Click to switch on or off.");
                     }
                     if d.auth != 0 {
                         ui.label(if d.auth == 1 { "Passphrase" } else { "Password" });
-                        ui.add(egui::TextEdit::singleline(&mut d.secret).password(true).hint_text("kept in memory only").desired_width(280.0));
+                        ui.add(egui::TextEdit::singleline(&mut d.secret).password(true).hint_text("asked for on connect if left empty").desired_width(280.0));
                         ui.end_row();
                     }
                 });
@@ -778,7 +953,27 @@ Click to switch on or off.");
                         ui.end_row();
                     }
                 });
-                if self.paths.is_none() {
+                if self.paths.is_some() {
+                    ui.add_space(6.0);
+                    w::section(ui, "This computer", "");
+                    ui.checkbox(&mut self.config.show_local, "Show this computer in the server list");
+                    if cfg!(windows) {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.config.show_wsl, "Show its Linux (WSL)");
+                            ui.label(w::muted("the default distribution; watching it keeps WSL running"));
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.config.remember_secrets, "Save passwords in the system keychain");
+                        ui.label(w::muted(if cfg!(windows) {
+                            "Windows Credential Manager"
+                        } else if cfg!(target_os = "macos") {
+                            "macOS Keychain"
+                        } else {
+                            "GNOME Keyring or KWallet"
+                        }));
+                    });
+                } else {
                     ui.label(w::muted("Demo mode: settings are not saved."));
                 }
                 ui.add_space(4.0);
@@ -791,11 +986,20 @@ Click to switch on or off.");
         if self.config.retention_days < before.retention_days {
             let _ = self.env.store.prune(self.config.retention_days, now_ts());
         }
-        if self.config.notifications != before.notifications
-            || self.config.interval_secs != before.interval_secs
-            || self.config.retention_days != before.retention_days
-        {
+        if self.config.remember_secrets != before.remember_secrets {
+            // Switching it off also removes what was stored before.
+            for server in &self.servers {
+                match self.secrets.get(&server.cfg.id) {
+                    Some(secret) if self.config.remember_secrets => self.remember(&server.cfg.id, secret),
+                    _ => secrets::delete(&server.cfg.id),
+                }
+            }
+        }
+        if self.config != before {
             self.apply_notifications();
+        }
+        if self.config.show_local != before.show_local || self.config.show_wsl != before.show_wsl {
+            self.apply_builtin();
         }
         if let Some(severity) = test {
             self.env.notifier.test(severity);
@@ -876,12 +1080,17 @@ fn overview_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64))
                 format!("{} of {}", fmt_bytes(s.mem_used), fmt_bytes(s.mem_total)),
                 w::level(mem_pct, 90.0, 95.0),
             ),
-            (
-                "Load (1 / 5 / 15 min)",
-                format!("{:.2}", s.load[0]),
-                format!("{:.2} / {:.2}", s.load[1], s.load[2]),
-                w::level(s.load[1] / cores * 100.0, 150.0, 300.0),
-            ),
+            if s.info.is_local_windows {
+                // Windows has no load average.
+                ("Processes", s.proc_count.to_string(), "running".into(), None)
+            } else {
+                (
+                    "Load (1 / 5 / 15 min)",
+                    format!("{:.2}", s.load[0]),
+                    format!("{:.2} / {:.2}", s.load[1], s.load[2]),
+                    w::level(s.load[1] / cores * 100.0, 150.0, 300.0),
+                )
+            },
             ("Network", fmt_rate(s.rx_bps), format!("in · {} out", fmt_rate(s.tx_bps)), None),
             (
                 "Fullest disk",
@@ -920,6 +1129,10 @@ fn overview_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64))
         });
     });
 
+    filesystems_card(ui, s);
+}
+
+fn filesystems_card(ui: &mut Ui, s: &Sample) {
     w::card(ui, |ui| {
         w::section(ui, "Filesystems", "");
         egui::Grid::new("disks").num_columns(5).spacing([24.0, 8.0]).show(ui, |ui| {
@@ -971,6 +1184,12 @@ fn cpu_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
     ui.columns(2, |cols| {
         w::card(&mut cols[0], |ui| {
             w::section(ui, "Load average", &format!("dashed line: {cores:.0} cores"));
+            if s.info.is_local_windows {
+                ui.add_space(70.0);
+                ui.vertical_centered(|ui| ui.label(w::muted("Windows does not keep a load average.")));
+                ui.add_space(86.0);
+                return;
+            }
             let series = vec![
                 Series::new("1 min", 0, points(state, |p| p.load[0] as f64)),
                 Series::new("5 min", 1, points(state, |p| p.load[1] as f64)),
@@ -1108,6 +1327,343 @@ fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String, by_memory: &mut b
         if procs.is_empty() {
             ui.label(w::muted("No process matches the filter."));
         }
+    });
+}
+
+const MIB: f64 = (1u64 << 20) as f64;
+
+fn network_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
+    let ports = s.net.iter().filter(|n| n.physical).count();
+    let busiest = s.net.iter().filter(|n| n.physical).max_by(|a, b| (a.rx_bps + a.tx_bps).total_cmp(&(b.rx_bps + b.tx_bps)));
+    w::tiles(
+        ui,
+        &[
+            ("Received", fmt_rate(s.rx_bps), format!("{ports} physical port{}", if ports == 1 { "" } else { "s" }), None),
+            ("Sent", fmt_rate(s.tx_bps), format!("{ports} physical port{}", if ports == 1 { "" } else { "s" }), None),
+            (
+                "Busiest port",
+                busiest.map(|n| n.name.clone()).unwrap_or("–".into()),
+                busiest.map(|n| format!("{} in · {} out", fmt_rate(n.rx_bps), fmt_rate(n.tx_bps))).unwrap_or_default(),
+                None,
+            ),
+            ("Interfaces", s.net.len().to_string(), format!("{} virtual", s.net.len() - ports), None),
+        ],
+    );
+
+    // Real ports first; an interface keeps its colour in both charts.
+    let mut names: Vec<&NetIface> = s.net.iter().filter(|n| state.history.back().is_some_and(|p| p.nets.iter().any(|h| h.0 == n.name))).collect();
+    names.sort_by(|a, b| b.physical.cmp(&a.physical));
+    names.truncate(w::SERIES.len());
+    let series = |f: fn(&(String, f64, f64)) -> f64| -> Vec<Series> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(slot, n)| {
+                let pts = state
+                    .history
+                    .iter()
+                    .filter_map(|p| Some([p.ts as f64, f(p.nets.iter().find(|h| h.0 == n.name)?) * 8.0 / 1e6]))
+                    .collect();
+                Series::new(n.name.clone(), slot, pts)
+            })
+            .collect()
+    };
+    ui.columns(2, |cols| {
+        w::card(&mut cols[0], |ui| {
+            w::section(ui, "Received by interface", "");
+            w::chart(ui, "net-rx", range, series(|h| h.1), ChartOptions::new(210.0, w::fmt_mbit));
+        });
+        w::card(&mut cols[1], |ui| {
+            w::section(ui, "Sent by interface", "");
+            w::chart(ui, "net-tx", range, series(|h| h.2), ChartOptions::new(210.0, w::fmt_mbit));
+        });
+    });
+
+    w::card(ui, |ui| {
+        w::section(ui, "Interfaces", "rates since the last poll, totals since the interface came up");
+        if s.net.is_empty() {
+            ui.label(w::muted("This machine reports no interface counters."));
+            return;
+        }
+        let top = s.net.iter().map(|n| n.rx_bps.max(n.tx_bps)).fold(1.0, f64::max);
+        egui::Grid::new("interfaces").num_columns(8).striped(true).spacing([24.0, 8.0]).show(ui, |ui| {
+            for head in ["Interface", "Received", "", "Sent", "", "Total received", "Total sent", "Kind"] {
+                ui.label(w::muted(head));
+            }
+            ui.end_row();
+            // Real ports on top, then whatever carried the most.
+            let mut rows: Vec<&NetIface> = s.net.iter().collect();
+            rows.sort_by(|a, b| b.physical.cmp(&a.physical).then((b.rx_total + b.tx_total).cmp(&(a.rx_total + a.tx_total))));
+            for n in rows {
+                ui.label(RichText::new(&n.name).strong());
+                ui.label(fmt_rate(n.rx_bps));
+                w::bar(ui, (n.rx_bps / top) as f32, 110.0, w::SERIES[0]);
+                ui.label(fmt_rate(n.tx_bps));
+                w::bar(ui, (n.tx_bps / top) as f32, 110.0, w::SERIES[1]);
+                ui.label(fmt_bytes(n.rx_total));
+                ui.label(fmt_bytes(n.tx_total));
+                ui.label(w::muted(if n.physical { "port" } else { "virtual, not in the totals" }));
+                ui.end_row();
+            }
+        });
+    });
+}
+
+fn disks_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
+    let read: f64 = s.disk_io.iter().map(|d| d.read_bps).sum();
+    let write: f64 = s.disk_io.iter().map(|d| d.write_bps).sum();
+    let iops: f64 = s.disk_io.iter().map(|d| d.iops).sum();
+    let busiest = s.disk_io.iter().filter(|d| d.util.is_some()).max_by(|a, b| a.util.unwrap_or(0.0).total_cmp(&b.util.unwrap_or(0.0)));
+    let fullest = s.disks.iter().max_by(|a, b| a.pct().total_cmp(&b.pct()));
+    let busiest_label = busiest.map(|d| format!("Busiest disk · {}", d.name)).unwrap_or_default();
+    let count = format!("{} disk{}", s.disk_io.len(), if s.disk_io.len() == 1 { "" } else { "s" });
+    w::tiles(
+        ui,
+        &[
+            ("Read", fmt_bytes_rate(read), count.clone(), None),
+            ("Write", fmt_bytes_rate(write), count, None),
+            match busiest {
+                Some(d) => {
+                    let util = d.util.unwrap_or(0.0);
+                    (busiest_label.as_str(), format!("{util:.0}%"), "share of time busy".into(), w::level(util, 85.0, 95.0))
+                }
+                None if iops > 0.0 => ("Operations", format!("{iops:.0}"), "reads and writes per second".into(), None),
+                None => ("Disks", s.disk_io.len().to_string(), "with transfer counters".into(), None),
+            },
+            (
+                "Fullest filesystem",
+                fullest.map(|d| format!("{:.0}%", d.pct())).unwrap_or("–".into()),
+                fullest.map(|d| d.mount.clone()).unwrap_or_default(),
+                fullest.and_then(|d| w::level(d.pct(), 85.0, 95.0)),
+            ),
+        ],
+    );
+
+    let transfer = |ui: &mut Ui| {
+        w::card(ui, |ui| {
+            w::section(ui, "Disk transfer", "all physical disks");
+            let series = vec![
+                Series::new("Read", 0, points(state, |p| p.disk_read_bps / MIB)),
+                Series::new("Write", 1, points(state, |p| p.disk_write_bps / MIB)),
+            ];
+            w::chart(ui, "disk-transfer", range, series, ChartOptions::new(200.0, w::fmt_mib_s));
+        });
+    };
+    let util: Vec<[f64; 2]> = state.history.iter().filter_map(|p| Some([p.ts as f64, p.disk_util? as f64])).collect();
+    if util.is_empty() {
+        transfer(ui);
+    } else {
+        ui.columns(2, |cols| {
+            transfer(&mut cols[0]);
+            w::card(&mut cols[1], |ui| {
+                w::section(ui, "Busiest disk", "share of time with requests pending");
+                let mut opt = ChartOptions::new(200.0, w::fmt_pct);
+                opt.y_max = Some(100.0);
+                opt.fill = true;
+                w::chart(ui, "disk-util", range, vec![Series::new("Busy", 0, util)], opt);
+            });
+        });
+    }
+
+    w::card(ui, |ui| {
+        w::section(ui, "Disks", "transfer since the last poll");
+        if s.disk_io.is_empty() {
+            ui.label(w::muted("This machine reports no disk counters."));
+            return;
+        }
+        // Windows and macOS report bytes only: no operation counts, no busy time.
+        let detailed = s.disk_io.iter().any(|d| d.util.is_some());
+        let heads: &[&str] = if detailed { &["Disk", "Read", "Write", "Operations / s", "Busy", ""] } else { &["Disk", "Read", "Write"] };
+        egui::Grid::new("disk-io").num_columns(heads.len()).striped(true).spacing([28.0, 8.0]).show(ui, |ui| {
+            for head in heads {
+                ui.label(w::muted(*head));
+            }
+            ui.end_row();
+            for d in &s.disk_io {
+                ui.label(RichText::new(&d.name).strong());
+                ui.label(fmt_bytes_rate(d.read_bps));
+                ui.label(fmt_bytes_rate(d.write_bps));
+                if !detailed {
+                    ui.end_row();
+                    continue;
+                }
+                ui.label(format!("{:.0}", d.iops));
+                match d.util {
+                    Some(util) => {
+                        ui.label(format!("{util:.0}%"));
+                        w::meter(ui, util / 100.0, 220.0);
+                    }
+                    None => {
+                        ui.label(w::muted("–"));
+                        ui.label(w::muted("not reported by this system"));
+                    }
+                }
+                ui.end_row();
+            }
+        });
+    });
+    filesystems_card(ui, s);
+}
+
+fn temps_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
+    if s.sensors.is_empty() {
+        w::card(ui, |ui| {
+            ui.label(RichText::new("This machine exposes no temperature sensors").strong());
+            ui.label(w::muted(if s.info.is_mac {
+                "macOS keeps its sensors private. Install macmon on the Mac (brew install macmon) and gridwatch reads CPU and GPU temperature through it."
+            } else if s.info.is_local_windows {
+                "Windows does not hand temperatures to ordinary programs."
+            } else {
+                "Virtual machines have none. On real hardware the sensor drivers may be missing: sudo sensors-detect."
+            }));
+        });
+        return;
+    }
+    let chips = chip_temps(&s.sensors);
+    let mut rows: Vec<(String, String, String, Option<(Color32, &str)>)> = Vec::new();
+    for kind in [SensorKind::Cpu, SensorKind::Gpu, SensorKind::Disk, SensorKind::Other] {
+        let hottest = s.sensors.iter().filter(|x| x.kind() == kind).max_by(|a, b| a.temp.total_cmp(&b.temp));
+        if let Some(x) = hottest {
+            let (warm, hot) = x.limits();
+            let name = if x.label.is_empty() { "hottest reading".to_string() } else { x.label.clone() };
+            // Mainboard inputs are often not connected and read nonsense: shown, not judged.
+            let state = if kind == SensorKind::Other { None } else { w::level(x.temp, warm, hot) };
+            rows.push((format!("{} · {}", kind.label(), x.chip), format!("{:.0} °C", x.temp), name, state));
+        }
+    }
+    rows.push(("Sensors".to_string(), s.sensors.len().to_string(), format!("on {} chip{}", chips.len(), if chips.len() == 1 { "" } else { "s" }), None));
+    let tiles: Vec<(&str, String, String, Option<(Color32, &str)>)> = rows.iter().map(|r| (r.0.as_str(), r.1.clone(), r.2.clone(), r.3)).collect();
+    w::tiles(ui, &tiles);
+
+    w::card(ui, |ui| {
+        let hint = if chips.len() > w::SERIES.len() { "hottest reading of the first 8 chips" } else { "hottest reading of each chip" };
+        w::section(ui, "Temperature by chip", hint);
+        let series = chips
+            .iter()
+            .take(w::SERIES.len())
+            .enumerate()
+            .map(|(slot, (chip, _))| {
+                let pts = state
+                    .history
+                    .iter()
+                    .filter_map(|p| Some([p.ts as f64, p.temps.iter().find(|t| t.0 == *chip)?.1 as f64]))
+                    .collect();
+                Series::new(chip.clone(), slot, pts)
+            })
+            .collect();
+        w::chart(ui, "temps", range, series, ChartOptions::new(240.0, w::fmt_temp));
+    });
+
+    w::card(ui, |ui| {
+        w::section(ui, "All sensors", "");
+        egui::Grid::new("sensors").num_columns(5).striped(true).spacing([28.0, 8.0]).show(ui, |ui| {
+            for head in ["Chip", "Reading", "Kind", "Temperature", ""] {
+                ui.label(w::muted(head));
+            }
+            ui.end_row();
+            for x in &s.sensors {
+                let (warm, hot) = x.limits();
+                ui.label(RichText::new(&x.chip).strong());
+                ui.label(if x.label.is_empty() { "–" } else { x.label.as_str() });
+                ui.label(w::muted(x.kind().label()));
+                ui.label(format!("{:.1} °C", x.temp));
+                match w::level(x.temp, warm, hot).filter(|_| x.kind() != SensorKind::Other) {
+                    Some((color, label)) => w::status(ui, color, label),
+                    None => {
+                        ui.label("");
+                    }
+                }
+                ui.end_row();
+            }
+        });
+        let sata = s.disk_io.iter().any(|d| d.name.starts_with("sd"));
+        if sata && !s.info.is_mac && !s.sensors.iter().any(|x| x.chip.starts_with("drivetemp")) {
+            ui.add_space(4.0);
+            ui.label(w::muted("SATA disks report their temperature once the drivetemp kernel module is loaded: sudo modprobe drivetemp"));
+        }
+    });
+}
+
+fn gpu_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
+    let busiest = s.gpus.iter().map(|g| g.util).fold(0.0, f32::max);
+    let used: u64 = s.gpus.iter().map(|g| g.mem_used).sum();
+    let total: u64 = s.gpus.iter().map(|g| g.mem_total).sum();
+    let hottest = s.gpus.iter().filter_map(|g| g.temp).reduce(f32::max);
+    let power: Option<f32> = s.gpus.iter().filter_map(|g| g.power).reduce(|a, b| a + b);
+    let name = if s.gpus.len() == 1 { s.gpus[0].name.clone() } else { format!("busiest of {} GPUs", s.gpus.len()) };
+    w::tiles(
+        ui,
+        &[
+            ("GPU load", format!("{busiest:.0}%"), name, None),
+            if total > 0 {
+                let pct = used as f32 / total as f32 * 100.0;
+                ("GPU memory", format!("{pct:.0}%"), format!("{} of {}", fmt_bytes(used), fmt_bytes(total)), w::level(pct, 95.0, 101.0))
+            } else {
+                ("GPU memory", fmt_bytes(used), "shared with the system memory".into(), None)
+            },
+            (
+                "Temperature",
+                hottest.map(|t| format!("{t:.0} °C")).unwrap_or("–".into()),
+                if hottest.is_some() { "hottest GPU".into() } else { "not reported".into() },
+                hottest.and_then(|t| w::level(t, 85.0, 95.0)),
+            ),
+            (
+                "Power",
+                power.map(|p| if p >= 10.0 { format!("{p:.0} W") } else { format!("{p:.1} W") }).unwrap_or("–".into()),
+                if power.is_some() { "drawn right now".into() } else { "not reported".into() },
+                None,
+            ),
+        ],
+    );
+
+    let series = |f: fn(&(f32, u64)) -> f64| -> Vec<Series> {
+        (0..s.gpus.len().min(w::SERIES.len()))
+            .map(|i| {
+                let pts = state.history.iter().filter_map(|p| Some([p.ts as f64, f(p.gpus.get(i)?)])).collect();
+                Series::new(format!("GPU {i}"), i, pts)
+            })
+            .collect()
+    };
+    ui.columns(2, |cols| {
+        w::card(&mut cols[0], |ui| {
+            w::section(ui, "GPU load", "share of time busy");
+            let mut opt = ChartOptions::new(200.0, w::fmt_pct);
+            opt.y_max = Some(100.0);
+            opt.fill = s.gpus.len() == 1;
+            w::chart(ui, "gpu-load", range, series(|g| g.0 as f64), opt);
+        });
+        w::card(&mut cols[1], |ui| {
+            w::section(ui, "GPU memory used", &if total > 0 { format!("of {}", fmt_bytes(total)) } else { "shared with the system memory".to_string() });
+            let mut opt = ChartOptions::new(200.0, w::fmt_gib);
+            if s.gpus.len() == 1 && total > 0 {
+                opt.y_max = Some(total as f64 / GIB);
+            }
+            opt.fill = s.gpus.len() == 1;
+            w::chart(ui, "gpu-mem", range, series(|g| g.1 as f64 / GIB), opt);
+        });
+    });
+
+    w::card(ui, |ui| {
+        egui::Grid::new("gpus").num_columns(7).striped(true).spacing([28.0, 8.0]).show(ui, |ui| {
+            for head in ["#", "Name", "Load", "", "Memory", "Temperature", "Power"] {
+                ui.label(w::muted(head));
+            }
+            ui.end_row();
+            for (i, g) in s.gpus.iter().enumerate() {
+                ui.label(i.to_string());
+                ui.label(RichText::new(&g.name).strong());
+                ui.label(format!("{:.0}%", g.util));
+                w::bar(ui, g.util / 100.0, 160.0, w::SERIES[i % w::SERIES.len()]);
+                if g.mem_total > 0 {
+                    ui.label(format!("{} of {}", fmt_bytes(g.mem_used), fmt_bytes(g.mem_total)));
+                } else {
+                    ui.label(format!("{} (shared)", fmt_bytes(g.mem_used)));
+                }
+                ui.label(g.temp.map(|t| format!("{t:.0} °C")).unwrap_or("–".into()));
+                ui.label(g.power.map(|p| format!("{p:.1} W")).unwrap_or("–".into()));
+                ui.end_row();
+            }
+        });
     });
 }
 

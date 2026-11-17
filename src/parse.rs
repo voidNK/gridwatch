@@ -17,7 +17,12 @@ echo @@uptime; cat /proc/uptime;
 echo @@net; cat /proc/net/dev;
 echo @@df; df -PT -k 2>/dev/null;
 echo @@freq; grep -i "cpu MHz" /proc/cpuinfo;
-echo @@temp; cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null;
+echo @@diskstats; cat /proc/diskstats 2>/dev/null;
+echo @@blocks; ls /sys/block 2>/dev/null;
+echo @@hwmon; for d in /sys/class/hwmon/hwmon*; do n=$(cat $d/name 2>/dev/null); for f in $d/temp*_input; do test -r $f && echo "$d|$n|$(cat ${f%_input}_label 2>/dev/null)|$(cat $f 2>/dev/null)"; done; done;
+echo @@zones; for z in /sys/class/thermal/thermal_zone*; do test -r $z/temp && echo "$(cat $z/type 2>/dev/null)|$(cat $z/temp 2>/dev/null)"; done;
+echo @@nvidia; command -v nvidia-smi >/dev/null 2>&1 && { nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null; echo @@nvapps; nvidia-smi --query-compute-apps=used_memory --format=csv,noheader,nounits 2>/dev/null; };
+echo @@drm; for c in /sys/class/drm/card[0-9]*; do test -r $c/device/gpu_busy_percent && echo "$c|$(cat $c/device/gpu_busy_percent 2>/dev/null)|$(cat $c/device/mem_info_vram_used 2>/dev/null)|$(cat $c/device/mem_info_vram_total 2>/dev/null)"; done;
 echo @@pstat; cat /proc/[0-9]*/stat 2>/dev/null;
 echo @@ps; ps -eo pid,user:16,rss,pmem,etimes,args 2>/dev/null | cut -c1-220;
 echo @@info;
@@ -32,9 +37,14 @@ echo @@end
 /// macOS has no `/proc`. Per-core counters come from the Mach kernel through the
 /// system Python (only touched when the developer tools are installed, the bare
 /// stub would open an install dialog); without Python `top` gives the total.
+/// Temperatures are only available through `macmon` (Homebrew), which samples for
+/// a second and therefore runs in the background while the rest is collected.
 pub const MAC_SCRIPT: &str = r#"
 export LC_ALL=C;
+PATH=$PATH:/usr/local/bin:/opt/homebrew/bin;
 echo @@darwin;
+T=$(mktemp);
+(command -v macmon >/dev/null 2>&1 && macmon pipe -s 1 -i 100 >$T 2>/dev/null) &
 PY=; for p in /usr/local/bin/python3 /opt/homebrew/bin/python3; do test -x $p && PY=$p; done;
 test -z "$PY" && xcode-select -p >/dev/null 2>&1 && PY=/usr/bin/python3;
 C=; test -n "$PY" && C=$($PY -c "import ctypes as c; l=c.CDLL(None); n=c.c_uint(); p=c.POINTER(c.c_int)(); m=c.c_uint(); l.mach_host_self.restype=c.c_uint; l.host_processor_info(l.mach_host_self(),2,c.byref(n),c.byref(p),c.byref(m)); [print(i,p[i*4],p[i*4+3],p[i*4+1],p[i*4+2]) for i in range(n.value)]" 2>/dev/null);
@@ -50,17 +60,21 @@ echo "now=$(date +%s)";
 echo @@vmstat; vm_stat;
 echo @@net; netstat -ibn;
 echo @@df; df -PkY 2>/dev/null || df -Pk;
+echo @@ioreg; ioreg -c IOBlockStorageDriver -r -w0 2>/dev/null | grep Statistics;
 echo @@ps; ps -axo pid,user,rss,pmem,etime,state,time,args | cut -c1-240;
 echo @@info;
 echo "kernel=$(uname -sr)";
 echo "model=$(sysctl -n machdep.cpu.brand_string)";
 echo "os=macOS $(sw_vers -productVersion)";
+echo @@macmon; wait; cat $T; rm -f $T;
 echo @@end
 "#;
 
-/// The command for a system poll: picks the script that fits the remote OS.
-pub fn system_command() -> String {
-    wrap(&format!("if test \"$(uname -s)\" = Darwin; then {MAC_SCRIPT}; else {SYSTEM_SCRIPT}; fi"))
+/// The script for a system poll: picks the part that fits the OS it runs on.
+pub fn system_script() -> String {
+    // Trimmed: a line that starts with ";" is a syntax error when the script is piped to a shell.
+    let (mac, linux) = (MAC_SCRIPT.trim(), SYSTEM_SCRIPT.trim());
+    format!("if test \"$(uname -s)\" = Darwin; then {mac}; else {linux}; fi")
 }
 
 pub const DOCKER_SCRIPT: &str = r#"
@@ -154,6 +168,119 @@ struct PsRow {
     cmd: String,
 }
 
+/// Cumulative transfer counters of one physical disk.
+#[derive(Clone, Debug, Default)]
+struct DiskCounter {
+    name: String,
+    read_bytes: u64,
+    write_bytes: u64,
+    ops: u64,
+    /// Milliseconds the disk had work queued; Linux only.
+    busy_ms: Option<u64>,
+}
+
+/// Devices in `/sys/block` that are not disks, or that sit on top of disks already counted.
+const VIRTUAL_DISKS: [&str; 8] = ["loop", "ram", "zram", "sr", "fd", "dm-", "md", "nbd"];
+
+/// Build the sensor list from `dir|chip|label|millidegrees` (hwmon) and `type|millidegrees` (thermal zones).
+fn parse_sensors(hwmon: &[&str], zones: &[&str]) -> Vec<Sensor> {
+    let reading = |v: &str| v.trim().parse::<f32>().ok().map(|v| v / 1000.0).filter(|v| (1.0..150.0).contains(v));
+    let mut out = Vec::new();
+    // Two chips of the same driver (two NVMe disks) get a number.
+    let mut dirs: Vec<(&str, &str)> = Vec::new();
+    for line in hwmon {
+        let f: Vec<&str> = line.split('|').collect();
+        if f.len() != 4 || f[1].is_empty() {
+            continue;
+        }
+        if !dirs.contains(&(f[0], f[1])) {
+            dirs.push((f[0], f[1]));
+        }
+        let nth = dirs.iter().filter(|d| d.1 == f[1]).position(|d| d.0 == f[0]).unwrap_or(0);
+        if let Some(temp) = reading(f[3]) {
+            out.push(Sensor {
+                chip: if nth == 0 { f[1].to_string() } else { format!("{} #{}", f[1], nth + 1) },
+                label: f[2].trim().to_string(),
+                temp,
+            });
+        }
+    }
+    // Thermal zones usually repeat what hwmon already reports.
+    for (i, line) in zones.iter().enumerate() {
+        let Some((kind, value)) = line.split_once('|') else { continue };
+        if kind.is_empty() || dirs.iter().any(|d| d.1 == kind) {
+            continue;
+        }
+        if let Some(temp) = reading(value) {
+            out.push(Sensor {
+                chip: kind.to_string(),
+                label: format!("zone {i}"),
+                temp,
+            });
+        }
+    }
+    out
+}
+
+/// GPUs from `nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw`
+/// (csv, no units), the memory of its compute processes in MiB, and `card|busy percent|vram used|vram total` of amdgpu.
+/// Each GPU with a temperature also becomes a sensor.
+pub fn parse_gpus(nvidia: &[&str], apps: &[&str], drm: &[&str], sensors: &mut Vec<Sensor>) -> Vec<Gpu> {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let mut out = Vec::new();
+    for line in nvidia {
+        let f: Vec<&str> = line.split(',').map(str::trim).collect();
+        if f.len() < 7 {
+            continue;
+        }
+        // Fields a GPU does not support read "[N/A]".
+        let n = |i: usize| f[i].parse::<f64>().ok();
+        out.push(Gpu {
+            name: f[1].to_string(),
+            util: n(2).unwrap_or(0.0) as f32,
+            mem_used: (n(3).unwrap_or(0.0) * MIB) as u64,
+            mem_total: (n(4).unwrap_or(0.0) * MIB) as u64,
+            temp: n(5).map(|t| t as f32),
+            power: n(6).map(|p| p as f32),
+        });
+    }
+    // A GPU that shares the system memory reports no usage of its own; its processes do.
+    if let [gpu] = out.as_mut_slice() {
+        if gpu.mem_total == 0 {
+            gpu.mem_used = (apps.iter().filter_map(|l| l.trim().parse::<f64>().ok()).sum::<f64>() * MIB) as u64;
+        }
+    }
+    for line in drm {
+        let f: Vec<&str> = line.split('|').collect();
+        if f.len() == 4 {
+            let card = f[0].rsplit('/').next().unwrap_or(f[0]);
+            out.push(Gpu {
+                name: format!("AMD GPU ({card})"),
+                util: f[1].trim().parse().unwrap_or(0.0),
+                mem_used: f[2].trim().parse().unwrap_or(0),
+                mem_total: f[3].trim().parse().unwrap_or(0),
+                ..Default::default()
+            });
+        }
+    }
+    for (i, gpu) in out.iter().enumerate() {
+        if let Some(temp) = gpu.temp {
+            sensors.push(Sensor {
+                chip: format!("GPU {i}"),
+                label: gpu.name.clone(),
+                temp,
+            });
+        }
+    }
+    out
+}
+
+/// The one temperature that stands for the machine: the CPU if it has a sensor.
+pub fn main_temp(sensors: &[Sensor]) -> Option<f32> {
+    let hottest = |kinds: &[SensorKind]| sensors.iter().filter(|s| kinds.contains(&s.kind())).map(|s| s.temp).reduce(f32::max);
+    hottest(&[SensorKind::Cpu]).or_else(|| hottest(&[SensorKind::Other]))
+}
+
 /// Raw counters of one poll. Rates are derived from two consecutive polls.
 #[derive(Clone, Debug, Default)]
 pub struct RawSystem {
@@ -167,9 +294,13 @@ pub struct RawSystem {
     uptime: u64,
     net_rx: u64,
     net_tx: u64,
+    /// (interface, bytes received, bytes sent, physical)
+    net_ifaces: Vec<(String, u64, u64, bool)>,
     disks: Vec<Disk>,
+    disk_counters: Vec<DiskCounter>,
     freqs: Vec<f32>,
-    temp: Option<f32>,
+    sensors: Vec<Sensor>,
+    gpus: Vec<Gpu>,
     /// pid -> (cpu ticks, state)
     proc_ticks: HashMap<u32, (u64, char)>,
     ps: Vec<PsRow>,
@@ -241,18 +372,21 @@ pub fn parse_system(text: &str) -> Result<RawSystem> {
             continue;
         };
         let iface = iface.trim();
-        // Skip loopback and container plumbing so traffic is not counted twice.
-        if iface == "lo" || ["veth", "docker", "br-", "virbr"].iter().any(|p| iface.starts_with(p)) {
-            continue;
-        }
+        // Loopback and container plumbing carry traffic that a real port already counted.
+        const VIRTUAL: [&str; 12] = ["veth", "docker", "br-", "virbr", "tun", "tap", "wg", "tailscale", "cni", "flannel", "cali", "bond"];
+        let physical = iface != "lo" && !VIRTUAL.iter().any(|p| iface.starts_with(p));
         let f: Vec<u64> = rest.split_whitespace().map(|x| x.parse().unwrap_or(0)).collect();
         if f.len() >= 9 {
-            raw.net_rx += f[0];
-            raw.net_tx += f[8];
+            if physical {
+                raw.net_rx += f[0];
+                raw.net_tx += f[8];
+            }
+            raw.net_ifaces.push((iface.to_string(), f[0], f[8], physical));
         }
     }
 
-    const PSEUDO_FS: [&str; 8] = [
+    const PSEUDO_FS: [&str; 12] = [
+        "9p", "drvfs", "iso9660", "erofs",
         "tmpfs", "devtmpfs", "overlay", "squashfs", "efivarfs", "proc", "sysfs", "nsfs",
     ];
     for line in get("df").iter().skip(1) {
@@ -278,12 +412,25 @@ pub fn parse_system(text: &str) -> Result<RawSystem> {
         .filter_map(|l| l.split_once(':')?.1.trim().parse().ok())
         .collect();
 
-    raw.temp = get("temp")
-        .iter()
-        .filter_map(|l| l.trim().parse::<f32>().ok())
-        .map(|v| v / 1000.0)
-        .filter(|v| (1.0..150.0).contains(v))
-        .reduce(f32::max);
+    raw.sensors = parse_sensors(get("hwmon"), get("zones"));
+    raw.gpus = parse_gpus(get("nvidia"), get("nvapps"), get("drm"), &mut raw.sensors);
+
+    // "major minor name reads merged sectors ms writes merged sectors ms in_flight ms_io ..."
+    let blocks = get("blocks");
+    for line in get("diskstats") {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 13 || !blocks.contains(&f[2]) || VIRTUAL_DISKS.iter().any(|p| f[2].starts_with(p)) {
+            continue;
+        }
+        let n = |i: usize| f[i].parse::<u64>().unwrap_or(0);
+        raw.disk_counters.push(DiskCounter {
+            name: f[2].to_string(),
+            read_bytes: n(5) * 512,
+            write_bytes: n(9) * 512,
+            ops: n(3) + n(7),
+            busy_ms: Some(n(12)),
+        });
+    }
 
     for line in get("pstat") {
         // "pid (comm) state ppid ... utime stime ..." - comm may contain spaces.
@@ -442,9 +589,15 @@ fn parse_mac(sec: &HashMap<&str, Vec<&str>>) -> Result<RawSystem> {
     // One "<Link#n>" row per interface carries its byte counters; en* are the physical ports.
     for line in get("net") {
         let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() >= 10 && f[0].starts_with("en") && f[2].starts_with("<Link") {
-            raw.net_rx += f[f.len() - 5].parse::<u64>().unwrap_or(0);
-            raw.net_tx += f[f.len() - 2].parse::<u64>().unwrap_or(0);
+        if f.len() >= 9 && f[2].starts_with("<Link") {
+            let name = f[0].trim_end_matches('*');
+            let (rx, tx) = (f[f.len() - 5].parse::<u64>().unwrap_or(0), f[f.len() - 2].parse::<u64>().unwrap_or(0));
+            let physical = name.starts_with("en");
+            if physical {
+                raw.net_rx += rx;
+                raw.net_tx += tx;
+            }
+            raw.net_ifaces.push((name.to_string(), rx, tx, physical));
         }
     }
 
@@ -462,6 +615,49 @@ fn parse_mac(sec: &HashMap<&str, Vec<&str>>) -> Result<RawSystem> {
             used: total.saturating_sub(available),
         });
     }
+
+    // One line per disk driver: {"Operations (Write)"=14730925,...,"Bytes (Read)"=747853242368,...}
+    for line in get("ioreg") {
+        let n = |key: &str| {
+            let value = line.split(&format!("\"{key}\"=")).nth(1).and_then(|v| v.split([',', '}']).next());
+            value.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0)
+        };
+        let (read_bytes, write_bytes) = (n("Bytes (Read)"), n("Bytes (Write)"));
+        // Drivers without any traffic are card readers and other empty slots.
+        if read_bytes + write_bytes > 0 {
+            raw.disk_counters.push(DiskCounter {
+                name: format!("disk{}", raw.disk_counters.len()),
+                read_bytes,
+                write_bytes,
+                ops: n("Operations (Read)") + n("Operations (Write)"),
+                busy_ms: None,
+            });
+        }
+    }
+
+    // macmon prints one JSON object: {"temp":{"cpu_temp_avg":34.9,"gpu_temp_avg":37.1},...}
+    if let Some(v) = get("macmon").first().and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+        // "gpu_usage":[frequency in MHz, share of time busy]
+        if let Some(busy) = v["gpu_usage"][1].as_f64() {
+            raw.gpus.push(Gpu {
+                name: "Apple GPU".to_string(),
+                util: (busy * 100.0) as f32,
+                temp: v["temp"]["gpu_temp_avg"].as_f64().map(|t| t as f32),
+                power: v["gpu_power"].as_f64().map(|p| p as f32),
+                ..Default::default()
+            });
+        }
+        for (chip, key) in [("CPU", "cpu_temp_avg"), ("GPU", "gpu_temp_avg")] {
+            if let Some(temp) = v["temp"][key].as_f64().filter(|t| (1.0..150.0).contains(t)) {
+                raw.sensors.push(Sensor {
+                    chip: chip.to_string(),
+                    label: "average".to_string(),
+                    temp: temp as f32,
+                });
+            }
+        }
+    }
+    raw.info.is_mac = true;
 
     // pid user rss %mem etime state time args
     for line in get("ps") {
@@ -531,6 +727,38 @@ pub fn build_sample(prev: &RawSystem, cur: &RawSystem, dt: f64, ts: i64) -> Samp
     rest.sort_by(|a, b| b.rss.cmp(&a.rss));
     procs.extend(rest.into_iter().take(40));
 
+    // Interfaces that never carried anything (unused ports) are left out.
+    let net = cur
+        .net_ifaces
+        .iter()
+        .filter(|n| n.1 + n.2 > 0)
+        .map(|(name, rx, tx, physical)| {
+            let before = prev.net_ifaces.iter().find(|p| p.0 == *name);
+            NetIface {
+                name: name.clone(),
+                rx_bps: before.map_or(0.0, |p| rate(*rx, p.1)),
+                tx_bps: before.map_or(0.0, |p| rate(*tx, p.2)),
+                rx_total: *rx,
+                tx_total: *tx,
+                physical: *physical,
+            }
+        })
+        .collect();
+    let disk_io = cur
+        .disk_counters
+        .iter()
+        .filter_map(|c| {
+            let p = prev.disk_counters.iter().find(|p| p.name == c.name)?;
+            Some(DiskIo {
+                name: c.name.clone(),
+                read_bps: rate(c.read_bytes, p.read_bytes),
+                write_bps: rate(c.write_bytes, p.write_bytes),
+                iops: rate(c.ops, p.ops),
+                util: c.busy_ms.zip(p.busy_ms).map(|(now, before)| (rate(now, before) / 10.0).clamp(0.0, 100.0) as f32),
+            })
+        })
+        .collect();
+
     Sample {
         ts,
         cpu: cur.cpu_direct.unwrap_or_else(|| cur.cpu.usage_since(&prev.cpu)),
@@ -547,8 +775,12 @@ pub fn build_sample(prev: &RawSystem, cur: &RawSystem, dt: f64, ts: i64) -> Samp
         swap_used: cur.swap_used,
         rx_bps: rate(cur.net_rx, prev.net_rx),
         tx_bps: rate(cur.net_tx, prev.net_tx),
+        net,
         disks: cur.disks.clone(),
-        temp: cur.temp,
+        disk_io,
+        temp: main_temp(&cur.sensors),
+        sensors: cur.sensors.clone(),
+        gpus: cur.gpus.clone(),
         uptime: cur.uptime,
         procs,
         proc_count,
@@ -627,6 +859,8 @@ mod tests {
     use super::*;
 
     fn system_output(cpu: &str, cpu0: &str, rx: u64, ticks: u64) -> String {
+        // The disk reads 1000 sectors and is busy for 2.5 s between the two polls.
+        let (sectors, busy) = if rx > 1000 { (2000, 3000) } else { (1000, 500) };
         format!(
             "@@stat\n{cpu}\n{cpu0}\nintr 1 2 3\n@@loadavg\n0.52 0.40 0.30 1/200 999\n\
              @@meminfo\nMemTotal:       8000000 kB\nMemFree:        1000000 kB\nMemAvailable:   6000000 kB\n\
@@ -636,7 +870,19 @@ mod tests {
              @@df\nFilesystem Type 1024-blocks Used Available Capacity Mounted on\n\
              /dev/sda1 ext4 1000000 900000 100000 90% /\ntmpfs tmpfs 5000 0 5000 0% /run\n\
              /dev/sdb1 xfs 2000000 500000 1500000 25% /mnt/my data\n\
-             @@freq\ncpu MHz\t\t: 3400.000\n@@temp\n45000\n61500\n\
+             @@freq\ncpu MHz\t\t: 3400.000\n\
+             @@diskstats\n   7       0 loop0 10 0 80 5 0 0 0 0 0 5 5\n\
+             \x20  8       0 sda 100 0 {sectors} 500 50 0 2000 700 0 {busy} 1200 0 0 0 0\n\
+             \x20  8       1 sda1 90 0 900 400 50 0 2000 700 0 800 1100\n\
+             \x20253       0 dm-0 90 0 900 400 50 0 2000 700 0 800 1100\n\
+             @@blocks\ndm-0\nloop0\nsda\n\
+             @@hwmon\n/sys/class/hwmon/hwmon0|k10temp|Tctl|61500\n/sys/class/hwmon/hwmon0|k10temp|Tccd1|58000\n\
+             /sys/class/hwmon/hwmon1|nvme|Composite|41000\n/sys/class/hwmon/hwmon2|nvme|Composite|44000\n\
+             /sys/class/hwmon/hwmon3|nct6779|AUXTIN3|91000\n/sys/class/hwmon/hwmon3|nct6779|PCH_CHIP_TEMP|0\n\
+             /sys/class/hwmon/hwmon4|acpitz||40000\n\
+             @@zones\nacpitz|40000\nx86_pkg_temp|60000\n\
+             @@nvidia\n0, NVIDIA GeForce RTX 5090, 37, 8192, 32768, 64, 210.50\n@@nvapps\n4096\n\
+             @@drm\n/sys/class/drm/card1|12|1048576|8388608\n\
              @@pstat\n42 (my (odd) proc) R 1 42 42 0 -1 4194304 100 0 0 0 {ticks} 50 0 0 20 0 1 0 100 1000 200\n\
              7 (defunct) Z 1 7 7 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 100 0 0\n\
              @@ps\n    PID USER               RSS %MEM ELAPSED COMMAND\n     42 www-data        204800  2.5    3600 /usr/bin/app --serve all\n\
@@ -662,7 +908,36 @@ mod tests {
         assert_eq!(s.swap_used, 500_000 * 1024);
         assert_eq!(s.uptime, 86400);
         assert_eq!(s.rx_bps, 1000.0); // lo and veth are ignored
+        let net: Vec<(&str, f64, u64, bool)> = s.net.iter().map(|n| (n.name.as_str(), n.rx_bps, n.rx_total, n.physical)).collect();
+        assert_eq!(net, vec![("lo", 0.0, 500, false), ("eth0", 1000.0, 6000, true), ("veth1a", 0.0, 9999, false)]);
+        // The CPU sensor counts, not the hotter (and unreliable) mainboard input.
         assert_eq!(s.temp, Some(61.5));
+        let sensors: Vec<(&str, &str, f32)> = s.sensors.iter().map(|x| (x.chip.as_str(), x.label.as_str(), x.temp)).collect();
+        assert_eq!(
+            sensors,
+            vec![
+                ("k10temp", "Tctl", 61.5),
+                ("k10temp", "Tccd1", 58.0),
+                ("nvme", "Composite", 41.0),
+                ("nvme #2", "Composite", 44.0),
+                ("nct6779", "AUXTIN3", 91.0),
+                ("acpitz", "", 40.0),
+                ("x86_pkg_temp", "zone 1", 60.0),
+                ("GPU 0", "NVIDIA GeForce RTX 5090", 64.0),
+            ]
+        );
+        assert_eq!(s.sensors[2].kind(), SensorKind::Disk);
+        assert_eq!(chip_temps(&s.sensors)[0], ("k10temp".to_string(), 61.5));
+
+        assert_eq!(s.gpus.len(), 2);
+        let g = &s.gpus[0];
+        assert_eq!((g.util, g.mem_used, g.mem_total, g.power), (37.0, 8192 << 20, 32768 << 20, Some(210.5)));
+        assert_eq!((s.gpus[1].name.as_str(), s.gpus[1].util, s.gpus[1].mem_total), ("AMD GPU (card1)", 12.0, 8388608));
+
+        // Only the whole disk counts: no loop device, partition or device mapper volume.
+        assert_eq!(s.disk_io.len(), 1);
+        let d = &s.disk_io[0];
+        assert_eq!((d.name.as_str(), d.read_bps, d.write_bps, d.iops, d.util), ("sda", 102_400.0, 0.0, 0.0, Some(50.0)));
         assert_eq!(s.freqs, vec![3400.0]);
         assert!(s.info.reboot_required);
         assert_eq!(s.info.cpu_model, "Test CPU");
@@ -716,7 +991,7 @@ mod tests {
     fn live_host() {
         let host = std::env::var("GRIDWATCH_TEST_HOST").expect("set GRIDWATCH_TEST_HOST");
         let poll = || {
-            let out = std::process::Command::new("ssh").args(["-o", "BatchMode=yes", &host, &system_command()]).output().unwrap();
+            let out = std::process::Command::new("ssh").args(["-o", "BatchMode=yes", &host, &wrap(&system_script())]).output().unwrap();
             parse_system(&String::from_utf8_lossy(&out.stdout)).unwrap()
         };
         let a = poll();
@@ -728,6 +1003,14 @@ mod tests {
         println!("poll took {:?}
 {s:#?}", started.elapsed());
         assert!(!s.cores.is_empty() && s.mem_total > 0 && !s.disks.is_empty() && s.proc_count > 0);
+    }
+
+    #[test]
+    fn gpu_with_shared_memory_takes_usage_from_its_processes() {
+        let mut sensors = Vec::new();
+        let gpus = parse_gpus(&["0, NVIDIA GB10, 0, [N/A], [N/A], 39, 9.48"], &["170", "170"], &[], &mut sensors);
+        assert_eq!((gpus[0].mem_used, gpus[0].mem_total, gpus[0].temp), (340 << 20, 0, Some(39.0)));
+        assert_eq!(sensors.len(), 1);
     }
 
     #[test]
@@ -763,10 +1046,13 @@ mod tests {
              /dev/disk3s5    apfs    1000000  580000 400000    60%    /System/Volumes/Data\n\
              map auto_home   autofs        0          0          0   100%    /System/Volumes/Data/home\n\
              /dev/disk5s1    exfat    500000  100000 400000    20%    /Volumes/My Backup\n\
+             @@ioreg\n      \"Statistics\" = {{\"Operations (Write)\"=0,\"Bytes (Read)\"=0,\"Bytes (Write)\"=0,\"Operations (Read)\"=0}}\n\
+             \x20 |   \"Statistics\" = {{\"Operations (Write)\"=100,\"Latency Time (Write)\"=0,\"Bytes (Read)\"={rx},\"Total Time (Read)\"=5,\"Bytes (Write)\"=7000,\"Operations (Read)\"=200,\"Retries (Write)\"=0}}\n\
              @@ps\n  PID USER                RSS %MEM     ELAPSED STAT      TIME ARGS\n\
              \x20 422 _windowserver     204800  1.2 07-01:21:32 Rs   {ticks} /System/Library/WindowServer -daemon\n\
              \x20 900 void                   0  0.0       00:10 Z      0:00.00 (defunct)\n\
-             @@info\nkernel=Darwin 25.6.0\nmodel=Apple M5 Max\nos=macOS 26.7\n@@end\n"
+             @@info\nkernel=Darwin 25.6.0\nmodel=Apple M5 Max\nos=macOS 26.7\n\
+             @@macmon\n{{\"all_power\":1.2,\"gpu_power\":0.5,\"gpu_usage\":[338,0.25],\"temp\":{{\"cpu_temp_avg\":34.5,\"gpu_temp_avg\":37.25}}}}\n@@end\n"
         )
     }
 
@@ -789,7 +1075,17 @@ mod tests {
         assert_eq!(s.swap_used, 512 << 20);
         assert_eq!(s.uptime, 86400);
         assert_eq!(s.rx_bps, 1000.0); // lo0, utun0 and the address rows are ignored
+        let net: Vec<(&str, f64, bool)> = s.net.iter().map(|n| (n.name.as_str(), n.rx_bps, n.physical)).collect();
+        assert_eq!(net, vec![("lo0", 0.0, false), ("en0", 1000.0, true), ("utun0", 0.0, false)]);
         assert_eq!(s.info.os, "macOS 26.7");
+        assert!(s.info.is_mac);
+        assert_eq!(s.temp, Some(34.5));
+        assert_eq!(s.sensors.len(), 2);
+        assert_eq!((s.sensors[1].kind(), s.sensors[1].temp), (SensorKind::Gpu, 37.25));
+        assert_eq!(s.gpus.len(), 1);
+        assert_eq!((s.gpus[0].util, s.gpus[0].mem_total, s.gpus[0].temp, s.gpus[0].power), (25.0, 0, Some(37.25), Some(0.5)));
+        assert_eq!(s.disk_io.len(), 1);
+        assert_eq!((s.disk_io[0].name.as_str(), s.disk_io[0].read_bps, s.disk_io[0].util), ("disk0", 1000.0, None));
 
         // The data volume stands for the internal disk; used = total - available.
         let disks: Vec<(&str, f32)> = s.disks.iter().map(|d| (d.mount.as_str(), d.pct().round())).collect();

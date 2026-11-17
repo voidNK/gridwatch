@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub servers: Vec<ServerConfig>,
     #[serde(default = "default_interval")]
@@ -17,7 +17,21 @@ pub struct Config {
     pub retention_days: u32,
     #[serde(default)]
     pub notifications: Notifications,
+    /// List the computer gridwatch runs on.
+    #[serde(default = "yes")]
+    pub show_local: bool,
+    /// List the default WSL distribution (Windows only). Off by default: polling keeps WSL running.
+    #[serde(default)]
+    pub show_wsl: bool,
+    /// Keep passwords and passphrases in the keychain of the operating system.
+    #[serde(default = "yes")]
+    pub remember_secrets: bool,
 }
+
+fn yes() -> bool {
+    true
+}
+
 
 /// How the user wants to hear about trouble.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -66,6 +80,9 @@ impl Default for Config {
             interval_secs: default_interval(),
             retention_days: default_retention(),
             notifications: Notifications::default(),
+            show_local: true,
+            show_wsl: false,
+            remember_secrets: true,
         }
     }
 }
@@ -118,6 +135,7 @@ CREATE TABLE IF NOT EXISTS samples (
     load1 REAL, load5 REAL, load15 REAL,
     mem_used INTEGER, mem_total INTEGER, swap_used INTEGER,
     rx_bps REAL, tx_bps REAL, temp REAL, cores TEXT,
+    disk_read REAL, disk_write REAL, disk_util REAL, temps TEXT, gpus TEXT, nets TEXT,
     PRIMARY KEY (server_id, ts)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS container_samples (
@@ -126,6 +144,9 @@ CREATE TABLE IF NOT EXISTS container_samples (
     PRIMARY KEY (server_id, ts, name)
 ) WITHOUT ROWID;
 ";
+
+/// Columns added after the first release; databases created before get them on open.
+const ADDED_COLUMNS: [&str; 6] = ["disk_read REAL", "disk_write REAL", "disk_util REAL", "temps TEXT", "gpus TEXT", "nets TEXT"];
 
 /// Number of points a chart gets at most; older data is averaged into buckets.
 const MAX_POINTS: i64 = 720;
@@ -144,6 +165,17 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
+        let mut existing = Vec::new();
+        conn.pragma(None, "table_info", "samples", |row| {
+            existing.push(row.get::<_, String>(1)?);
+            Ok(())
+        })?;
+        for column in ADDED_COLUMNS {
+            let name = column.split(' ').next().unwrap_or(column);
+            if !existing.iter().any(|e| e == name) {
+                conn.execute_batch(&format!("ALTER TABLE samples ADD COLUMN {column}"))?;
+            }
+        }
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -151,7 +183,7 @@ impl Store {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT OR REPLACE INTO samples VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            "INSERT OR REPLACE INTO samples VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
             params![
                 server_id,
                 p.ts,
@@ -170,6 +202,12 @@ impl Store {
                 p.tx_bps,
                 p.temp,
                 serde_json::to_string(&p.cores)?,
+                p.disk_read_bps,
+                p.disk_write_bps,
+                p.disk_util,
+                serde_json::to_string(&p.temps)?,
+                serde_json::to_string(&p.gpus)?,
+                serde_json::to_string(&p.nets)?,
             ],
         )?;
         if let DockerState::Ok(list) = docker {
@@ -190,7 +228,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT ts, cpu, cpu_user, cpu_system, cpu_iowait, cpu_steal, load1, load5, load15,
-                    mem_used, mem_total, swap_used, rx_bps, tx_bps, temp, cores
+                    mem_used, mem_total, swap_used, rx_bps, tx_bps, temp, cores,
+                    disk_read, disk_write, disk_util, temps, gpus, nets
              FROM samples WHERE server_id = ?1 AND ts >= ?2 ORDER BY ts",
         )?;
         let rows = stmt.query_map(params![server_id, since], |r| {
@@ -212,6 +251,13 @@ impl Store {
                 tx_bps: r.get(13)?,
                 temp: r.get(14)?,
                 cores: serde_json::from_str(&cores).unwrap_or_default(),
+                // Rows written by older versions have no values here.
+                disk_read_bps: r.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+                disk_write_bps: r.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
+                disk_util: r.get(18)?,
+                temps: json(r.get(19)?),
+                gpus: json(r.get(20)?),
+                nets: json(r.get(21)?),
             })
         })?;
 
@@ -271,6 +317,10 @@ impl Store {
     }
 }
 
+fn json<T: serde::de::DeserializeOwned + Default>(text: Option<String>) -> T {
+    text.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
 fn average(group: &[HistPoint]) -> HistPoint {
     if group.len() == 1 {
         return group[0].clone();
@@ -280,6 +330,31 @@ fn average(group: &[HistPoint]) -> HistPoint {
     let mean64 = |f: &dyn Fn(&HistPoint) -> f64| group.iter().map(f).sum::<f64>() / n as f64;
     let last = &group[group.len() - 1];
     let temps: Vec<f32> = group.iter().filter_map(|p| p.temp).collect();
+    let utils: Vec<f32> = group.iter().filter_map(|p| p.disk_util).collect();
+    // Per chip and per GPU: sum and count, in order of first appearance.
+    let mut chips: Vec<(String, f32, u32)> = Vec::new();
+    let mut gpus: Vec<(f32, f64, u32)> = Vec::new();
+    let mut nets: Vec<(String, f64, f64, u32)> = Vec::new();
+    for p in group {
+        for (name, rx, tx) in &p.nets {
+            match nets.iter_mut().find(|n| n.0 == *name) {
+                Some(n) => (n.1, n.2, n.3) = (n.1 + rx, n.2 + tx, n.3 + 1),
+                None => nets.push((name.clone(), *rx, *tx, 1)),
+            }
+        }
+        for (chip, temp) in &p.temps {
+            match chips.iter_mut().find(|c| c.0 == *chip) {
+                Some(c) => (c.1, c.2) = (c.1 + temp, c.2 + 1),
+                None => chips.push((chip.clone(), *temp, 1)),
+            }
+        }
+        for (i, (util, mem)) in p.gpus.iter().enumerate() {
+            if gpus.len() <= i {
+                gpus.push((0.0, 0.0, 0));
+            }
+            gpus[i] = (gpus[i].0 + util, gpus[i].1 + *mem as f64, gpus[i].2 + 1);
+        }
+    }
     let mut cores = BTreeMap::new();
     for p in group {
         for (i, v) in p.cores.iter().enumerate() {
@@ -305,6 +380,12 @@ fn average(group: &[HistPoint]) -> HistPoint {
         tx_bps: mean64(&|p| p.tx_bps),
         temp: (!temps.is_empty()).then(|| temps.iter().sum::<f32>() / temps.len() as f32),
         cores: cores.into_values().map(|(sum, count)| sum / count as f32).collect(),
+        disk_read_bps: mean64(&|p| p.disk_read_bps),
+        disk_write_bps: mean64(&|p| p.disk_write_bps),
+        disk_util: (!utils.is_empty()).then(|| utils.iter().sum::<f32>() / utils.len() as f32),
+        temps: chips.into_iter().map(|(chip, sum, count)| (chip, sum / count as f32)).collect(),
+        gpus: gpus.into_iter().map(|(util, mem, count)| (util / count as f32, (mem / count as f64) as u64)).collect(),
+        nets: nets.into_iter().map(|(name, rx, tx, count)| (name, rx / count as f64, tx / count as f64)).collect(),
     }
 }
 
@@ -320,8 +401,37 @@ mod tests {
             mem_total: 200,
             cores: vec![cpu, 0.0],
             temp: Some(50.0),
+            disk_read_bps: cpu as f64 * 100.0,
+            disk_util: Some(cpu),
+            temps: vec![("k10temp".into(), 50.0 + cpu), ("nvme".into(), 40.0)],
+            gpus: vec![(cpu * 2.0, 1000)],
+            nets: vec![("eth0".into(), cpu as f64, 8.0)],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn upgrades_a_database_from_the_first_release() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE samples (
+                server_id TEXT NOT NULL, ts INTEGER NOT NULL,
+                cpu REAL, cpu_user REAL, cpu_system REAL, cpu_iowait REAL, cpu_steal REAL,
+                load1 REAL, load5 REAL, load15 REAL,
+                mem_used INTEGER, mem_total INTEGER, swap_used INTEGER,
+                rx_bps REAL, tx_bps REAL, temp REAL, cores TEXT,
+                PRIMARY KEY (server_id, ts)
+            ) WITHOUT ROWID;
+            INSERT INTO samples VALUES ('a', 1000, 12.5, 10, 2.5, 0, 0, 1, 1, 1, 100, 200, 0, 0, 0, 40, '[12.5]');",
+        )
+        .unwrap();
+        let store = Store::init(conn).unwrap();
+        store.insert("a", &point(1001, 4.0), &DockerState::Unknown).unwrap();
+        let h = store.load_history("a", 1000, 1010).unwrap();
+        assert_eq!(h.len(), 2);
+        assert_eq!((h[0].cpu.total, h[0].disk_read_bps, h[0].disk_util), (12.5, 0.0, None));
+        assert!(h[0].temps.is_empty() && h[0].gpus.is_empty());
+        assert_eq!(h[1].disk_util, Some(4.0));
     }
 
     #[test]
@@ -345,11 +455,18 @@ mod tests {
         assert_eq!(h[3].cpu.total, 3.0);
         assert_eq!(h[3].cores, vec![3.0, 0.0]);
         assert_eq!(h[3].temp, Some(50.0));
+        assert_eq!((h[3].disk_read_bps, h[3].disk_util), (300.0, Some(3.0)));
+        assert_eq!(h[3].temps, vec![("k10temp".to_string(), 53.0), ("nvme".to_string(), 40.0)]);
+        assert_eq!(h[3].gpus, vec![(6.0, 1000)]);
 
         // Long range: 2-second buckets average neighbouring samples.
         let h = store.load_history("a", 1000, 1000 + 2 * MAX_POINTS).unwrap();
         assert_eq!(h.len(), 5);
         assert_eq!(h[0].cpu.total, 0.5);
+        assert_eq!((h[0].disk_read_bps, h[0].disk_util), (50.0, Some(0.5)));
+        assert_eq!(h[0].temps[0], ("k10temp".to_string(), 50.5));
+        assert_eq!(h[0].gpus, vec![(1.0, 1000)]);
+        assert_eq!(h[0].nets, vec![("eth0".to_string(), 0.5, 8.0)]);
 
         let c = store.load_container_history("a", 0, 1010).unwrap();
         assert_eq!(c["web"].len(), 10);

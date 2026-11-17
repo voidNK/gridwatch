@@ -12,6 +12,17 @@ pub enum AuthMethod {
     Password,
 }
 
+/// How a machine is reached.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ServerKind {
+    #[default]
+    Ssh,
+    /// The computer gridwatch runs on.
+    Local,
+    /// The default WSL distribution of this Windows computer.
+    Wsl,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ServerConfig {
     pub id: String,
@@ -20,6 +31,8 @@ pub struct ServerConfig {
     pub port: u16,
     pub user: String,
     pub auth: AuthMethod,
+    #[serde(default)]
+    pub kind: ServerKind,
 }
 
 impl ServerConfig {
@@ -31,7 +44,31 @@ impl ServerConfig {
         format!("{nanos:x}")
     }
 
+    /// The entry for this computer or its WSL distribution; there is at most one of each.
+    pub fn builtin(kind: ServerKind) -> Self {
+        let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        let host = env("COMPUTERNAME")
+            .or_else(|| env("HOSTNAME"))
+            .or_else(|| std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_string()).filter(|h| !h.is_empty()))
+            .unwrap_or_else(|| "This computer".to_string());
+        let wsl = kind == ServerKind::Wsl;
+        Self {
+            id: if wsl { "wsl" } else { "local" }.to_string(),
+            name: if wsl { format!("{host} (WSL)") } else { host.clone() },
+            host,
+            port: 0,
+            user: env("USERNAME").or_else(|| env("USER")).unwrap_or_default(),
+            auth: AuthMethod::Auto,
+            kind,
+        }
+    }
+
     pub fn address(&self) -> String {
+        match self.kind {
+            ServerKind::Local => return "this computer".to_string(),
+            ServerKind::Wsl => return "Linux on this computer".to_string(),
+            ServerKind::Ssh => {}
+        }
         if self.port == 22 {
             format!("{}@{}", self.user, self.host)
         } else {
@@ -67,6 +104,116 @@ impl Disk {
     }
 }
 
+/// Traffic of one network interface between two polls.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NetIface {
+    pub name: String,
+    /// Bytes per second.
+    pub rx_bps: f64,
+    pub tx_bps: f64,
+    /// Bytes since the interface came up.
+    pub rx_total: u64,
+    pub tx_total: u64,
+    /// A real port. Only these count towards the totals of the machine; bridges,
+    /// tunnels and container interfaces carry the same traffic a second time.
+    pub physical: bool,
+}
+
+/// Transfer rates of one physical disk between two polls.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DiskIo {
+    pub name: String,
+    pub read_bps: f64,
+    pub write_bps: f64,
+    /// Read and write operations per second.
+    pub iops: f64,
+    /// Share of time the disk was busy, in percent. Not reported by macOS.
+    pub util: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SensorKind {
+    Cpu,
+    Gpu,
+    Disk,
+    /// Mainboard, network card and anything else; shown but never alerted on.
+    Other,
+}
+
+impl SensorKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SensorKind::Cpu => "CPU",
+            SensorKind::Gpu => "GPU",
+            SensorKind::Disk => "Disk",
+            SensorKind::Other => "Other",
+        }
+    }
+}
+
+/// A graphics card, as reported by nvidia-smi, the amdgpu driver or macmon.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Gpu {
+    pub name: String,
+    /// Percent of time the GPU was busy.
+    pub util: f32,
+    pub mem_used: u64,
+    /// 0 when the GPU has no memory of its own (Apple Silicon, NVIDIA GB10 and other unified designs).
+    pub mem_total: u64,
+    pub temp: Option<f32>,
+    /// Watts
+    pub power: Option<f32>,
+}
+
+/// One temperature reading.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sensor {
+    /// Driver that reports it, e.g. `k10temp`, `nvme`, `nvme #2`.
+    pub chip: String,
+    /// Name of the reading on that chip, e.g. `Tctl`, `Composite`; may be empty.
+    pub label: String,
+    pub temp: f32,
+}
+
+impl Sensor {
+    pub fn kind(&self) -> SensorKind {
+        let chip = self.chip.to_lowercase();
+        let any = |names: &[&str]| names.iter().any(|n| chip.starts_with(n));
+        if any(&["k10temp", "coretemp", "zenpower", "cpu", "x86_pkg_temp", "soc"]) {
+            SensorKind::Cpu
+        } else if any(&["amdgpu", "radeon", "nouveau", "nvidia", "gpu"]) {
+            SensorKind::Gpu
+        } else if any(&["nvme", "drivetemp"]) {
+            SensorKind::Disk
+        } else {
+            SensorKind::Other
+        }
+    }
+
+    /// Temperatures from which the reading counts as warm and as too hot.
+    /// Spinning and SATA disks tolerate far less than chips do.
+    pub fn limits(&self) -> (f32, f32) {
+        match self.kind() {
+            SensorKind::Disk if self.chip.starts_with("drivetemp") => (50.0, 60.0),
+            SensorKind::Disk => (70.0, 80.0),
+            SensorKind::Gpu => (85.0, 95.0),
+            _ => (80.0, 90.0),
+        }
+    }
+}
+
+/// The hottest reading of every chip, in the order the chips were reported.
+pub fn chip_temps(sensors: &[Sensor]) -> Vec<(String, f32)> {
+    let mut out: Vec<(String, f32)> = Vec::new();
+    for s in sensors {
+        match out.iter_mut().find(|(chip, _)| *chip == s.chip) {
+            Some((_, temp)) => *temp = temp.max(s.temp),
+            None => out.push((s.chip.clone(), s.temp)),
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug)]
 pub struct Proc {
     pub pid: u32,
@@ -88,6 +235,9 @@ pub struct HostInfo {
     pub reboot_required: bool,
     /// The host reports only total CPU usage (macOS without Python).
     pub no_per_core: bool,
+    pub is_mac: bool,
+    /// This computer, read through the Windows API instead of a shell.
+    pub is_local_windows: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -143,8 +293,13 @@ pub struct Sample {
     pub swap_used: u64,
     pub rx_bps: f64,
     pub tx_bps: f64,
+    pub net: Vec<NetIface>,
     pub disks: Vec<Disk>,
+    pub disk_io: Vec<DiskIo>,
+    /// Hottest CPU sensor, or the hottest sensor that is not a disk if the CPU has none.
     pub temp: Option<f32>,
+    pub sensors: Vec<Sensor>,
+    pub gpus: Vec<Gpu>,
     pub uptime: u64,
     pub procs: Vec<Proc>,
     pub proc_count: usize,
@@ -165,6 +320,17 @@ pub struct HistPoint {
     pub tx_bps: f64,
     pub temp: Option<f32>,
     pub cores: Vec<f32>,
+    /// Sum over all physical disks, bytes per second.
+    pub disk_read_bps: f64,
+    pub disk_write_bps: f64,
+    /// Utilisation of the busiest disk in percent.
+    pub disk_util: Option<f32>,
+    /// Hottest reading per chip.
+    pub temps: Vec<(String, f32)>,
+    /// (utilisation percent, memory used) per GPU.
+    pub gpus: Vec<(f32, u64)>,
+    /// (interface, received, sent) in bytes per second.
+    pub nets: Vec<(String, f64, f64)>,
 }
 
 impl HistPoint {
@@ -180,6 +346,13 @@ impl HistPoint {
             tx_bps: s.tx_bps,
             temp: s.temp,
             cores: s.cores.clone(),
+            disk_read_bps: s.disk_io.iter().map(|d| d.read_bps).sum(),
+            disk_write_bps: s.disk_io.iter().map(|d| d.write_bps).sum(),
+            disk_util: s.disk_io.iter().filter_map(|d| d.util).reduce(f32::max),
+            temps: chip_temps(&s.sensors),
+            gpus: s.gpus.iter().map(|g| (g.util, g.mem_used)).collect(),
+            // Container interfaces come and go under random names; their history would only be noise.
+            nets: s.net.iter().filter(|n| !n.name.starts_with("veth")).take(16).map(|n| (n.name.clone(), n.rx_bps, n.tx_bps)).collect(),
         }
     }
 }
@@ -235,6 +408,11 @@ impl ServerState {
 }
 
 pub type Shared = Arc<Mutex<ServerState>>;
+
+/// Bytes per second, for disks (network rates are shown in bits).
+pub fn fmt_bytes_rate(bps: f64) -> String {
+    format!("{}/s", fmt_bytes(bps.max(0.0) as u64))
+}
 
 pub fn fmt_bytes(b: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
