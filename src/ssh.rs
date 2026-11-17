@@ -58,9 +58,7 @@ impl client::Handler for Handler {
         }
         match check_known_hosts_path(&self.host, self.port, key, &self.known_hosts) {
             Ok(true) => Ok(true),
-            Err(russh::keys::Error::KeyChanged { .. }) => {
-                Err(changed(&self.known_hosts.display().to_string()))
-            }
+            Err(russh::keys::Error::KeyChanged { .. }) => Err(changed(&self.known_hosts.display().to_string())),
             _ => {
                 russh::keys::known_hosts::learn_known_hosts_path(&self.host, self.port, key, &self.known_hosts)?;
                 Ok(true)
@@ -74,10 +72,10 @@ pub struct Session {
 }
 
 fn expand_home(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
-        if let Some(dirs) = directories::UserDirs::new() {
-            return dirs.home_dir().join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
+        && let Some(dirs) = directories::UserDirs::new()
+    {
+        return dirs.home_dir().join(rest);
     }
     PathBuf::from(path)
 }
@@ -94,11 +92,7 @@ fn default_keys() -> Vec<PathBuf> {
 }
 
 impl Session {
-    pub async fn connect(
-        cfg: &ServerConfig,
-        secret: Option<&str>,
-        known_hosts: &Path,
-    ) -> Result<Self, ConnectError> {
+    pub async fn connect(cfg: &ServerConfig, secret: Option<&str>, known_hosts: &Path) -> Result<Self, ConnectError> {
         let config = Arc::new(client::Config {
             keepalive_interval: Some(Duration::from_secs(20)),
             keepalive_max: 3,
@@ -120,7 +114,12 @@ impl Session {
                 let Some(password) = secret else {
                     return Err(ConnectError::NeedsSecret(format!("Password for {}", cfg.address())));
                 };
-                if !session.handle.authenticate_password(&cfg.user, password).await?.success() {
+                if !session
+                    .handle
+                    .authenticate_password(&cfg.user, password)
+                    .await?
+                    .success()
+                {
                     return Err(ConnectError::NeedsSecret(format!(
                         "Password rejected. Password for {}",
                         cfg.address()
@@ -200,7 +199,11 @@ impl Session {
         for identity in identities {
             let key = identity.public_key().into_owned();
             let hash = if key.algorithm().is_rsa() { rsa_hash } else { None };
-            match self.handle.authenticate_publickey_with(user, key, hash, &mut agent).await {
+            match self
+                .handle
+                .authenticate_publickey_with(user, key, hash, &mut agent)
+                .await
+            {
                 Ok(result) if result.success() => return true,
                 _ => tried.push(format!("agent key {} (rejected)", identity.comment())),
             }

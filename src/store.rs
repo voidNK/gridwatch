@@ -32,7 +32,6 @@ fn yes() -> bool {
     true
 }
 
-
 /// How the user wants to hear about trouble.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -96,7 +95,8 @@ pub struct Paths {
 
 impl Paths {
     pub fn resolve() -> Result<Self> {
-        let dirs = directories::ProjectDirs::from("", "", "gridwatch").context("cannot locate the user profile directory")?;
+        let dirs =
+            directories::ProjectDirs::from("", "", "gridwatch").context("cannot locate the user profile directory")?;
         std::fs::create_dir_all(dirs.config_dir())?;
         std::fs::create_dir_all(dirs.data_dir())?;
         Ok(Self {
@@ -146,7 +146,14 @@ CREATE TABLE IF NOT EXISTS container_samples (
 ";
 
 /// Columns added after the first release; databases created before get them on open.
-const ADDED_COLUMNS: [&str; 6] = ["disk_read REAL", "disk_write REAL", "disk_util REAL", "temps TEXT", "gpus TEXT", "nets TEXT"];
+const ADDED_COLUMNS: [&str; 6] = [
+    "disk_read REAL",
+    "disk_write REAL",
+    "disk_util REAL",
+    "temps TEXT",
+    "gpus TEXT",
+    "nets TEXT",
+];
 
 /// Number of points a chart gets at most; older data is averaged into buckets.
 const MAX_POINTS: i64 = 720;
@@ -291,7 +298,12 @@ impl Store {
              GROUP BY name, b ORDER BY b",
         )?;
         let rows = stmt.query_map(params![server_id, since, bucket], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f32>(2)?, r.get::<_, f64>(3)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, f32>(2)?,
+                r.get::<_, f64>(3)?,
+            ))
         })?;
         let mut out: HashMap<String, VecDeque<ContainerPoint>> = HashMap::new();
         for row in rows {
@@ -383,9 +395,18 @@ fn average(group: &[HistPoint]) -> HistPoint {
         disk_read_bps: mean64(&|p| p.disk_read_bps),
         disk_write_bps: mean64(&|p| p.disk_write_bps),
         disk_util: (!utils.is_empty()).then(|| utils.iter().sum::<f32>() / utils.len() as f32),
-        temps: chips.into_iter().map(|(chip, sum, count)| (chip, sum / count as f32)).collect(),
-        gpus: gpus.into_iter().map(|(util, mem, count)| (util / count as f32, (mem / count as f64) as u64)).collect(),
-        nets: nets.into_iter().map(|(name, rx, tx, count)| (name, rx / count as f64, tx / count as f64)).collect(),
+        temps: chips
+            .into_iter()
+            .map(|(chip, sum, count)| (chip, sum / count as f32))
+            .collect(),
+        gpus: gpus
+            .into_iter()
+            .map(|(util, mem, count)| (util / count as f32, (mem / count as f64) as u64))
+            .collect(),
+        nets: nets
+            .into_iter()
+            .map(|(name, rx, tx, count)| (name, rx / count as f64, tx / count as f64))
+            .collect(),
     }
 }
 
@@ -396,7 +417,10 @@ mod tests {
     fn point(ts: i64, cpu: f32) -> HistPoint {
         HistPoint {
             ts,
-            cpu: CpuUsage { total: cpu, ..Default::default() },
+            cpu: CpuUsage {
+                total: cpu,
+                ..Default::default()
+            },
             mem_used: 100,
             mem_total: 200,
             cores: vec![cpu, 0.0],
@@ -456,7 +480,10 @@ mod tests {
         assert_eq!(h[3].cores, vec![3.0, 0.0]);
         assert_eq!(h[3].temp, Some(50.0));
         assert_eq!((h[3].disk_read_bps, h[3].disk_util), (300.0, Some(3.0)));
-        assert_eq!(h[3].temps, vec![("k10temp".to_string(), 53.0), ("nvme".to_string(), 40.0)]);
+        assert_eq!(
+            h[3].temps,
+            vec![("k10temp".to_string(), 53.0), ("nvme".to_string(), 40.0)]
+        );
         assert_eq!(h[3].gpus, vec![(6.0, 1000)]);
 
         // Long range: 2-second buckets average neighbouring samples.

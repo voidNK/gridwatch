@@ -71,7 +71,14 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
 
     if cpu_avg > 85.0 {
         let culprit = top_cpu
-            .map(|p| format!(" Busiest process: {} (pid {}, {:.0}% of a core).", short(&p.cmd), p.pid, p.cpu))
+            .map(|p| {
+                format!(
+                    " Busiest process: {} (pid {}, {:.0}% of a core).",
+                    short(&p.cmd),
+                    p.pid,
+                    p.cpu
+                )
+            })
             .unwrap_or_default();
         add(
             if cpu_avg > 95.0 { Critical } else { Warning },
@@ -111,17 +118,19 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
         );
     }
 
-    if cpu_avg < 50.0 {
-        if let Some((i, v)) = s.cores.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) {
-            if *v > 95.0 && s.cores.len() > 1 {
-                add(
-                    Info,
-                    format!("Core {i} is pegged while the machine is mostly idle"),
-                    format!("One core runs at {v:.0}% but total CPU is only {cpu_avg:.0}%: a single-threaded workload is the limit."),
-                    "More cores will not help this workload; use a faster core or parallelise the job.",
-                );
-            }
-        }
+    if cpu_avg < 50.0
+        && let Some((i, v)) = s.cores.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1))
+        && *v > 95.0
+        && s.cores.len() > 1
+    {
+        add(
+            Info,
+            format!("Core {i} is pegged while the machine is mostly idle"),
+            format!(
+                "One core runs at {v:.0}% but total CPU is only {cpu_avg:.0}%: a single-threaded workload is the limit."
+            ),
+            "More cores will not help this workload; use a faster core or parallelise the job.",
+        );
     }
 
     if s.mem_total > 0 {
@@ -157,35 +166,55 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
             add(
                 if pct > 95.0 { Critical } else { Warning },
                 format!("Disk {} is {pct:.0}% full", d.mount),
-                format!("{} free of {}.", fmt_bytes(d.total.saturating_sub(d.used)), fmt_bytes(d.total)),
+                format!(
+                    "{} free of {}.",
+                    fmt_bytes(d.total.saturating_sub(d.used)),
+                    fmt_bytes(d.total)
+                ),
                 "Find large directories with `du -xh --max-depth=2 / | sort -h | tail`, rotate logs, run `docker system df`.",
             );
         }
     }
 
-    if let Some(t) = s.temp {
-        if t > 80.0 {
-            add(
-                if t > 90.0 { Critical } else { Warning },
-                format!("High temperature: {t:.0} °C"),
-                "The CPU will throttle to protect itself, reducing performance.".into(),
-                "Check fans, airflow and dust; verify the heatsink is seated.",
-            );
-        }
+    if let Some(t) = s.temp
+        && t > 80.0
+    {
+        add(
+            if t > 90.0 { Critical } else { Warning },
+            format!("High temperature: {t:.0} °C"),
+            "The CPU will throttle to protect itself, reducing performance.".into(),
+            "Check fans, airflow and dust; verify the heatsink is seated.",
+        );
     }
 
     // Disks and GPUs have their own limits; mainboard inputs are too unreliable to judge.
-    for sensor in s.sensors.iter().filter(|x| matches!(x.kind(), SensorKind::Disk | SensorKind::Gpu)) {
+    for sensor in s
+        .sensors
+        .iter()
+        .filter(|x| matches!(x.kind(), SensorKind::Disk | SensorKind::Gpu))
+    {
         let (warm, hot) = sensor.limits();
         if sensor.temp >= warm {
             let disk = sensor.kind() == SensorKind::Disk;
             add(
                 if sensor.temp >= hot { Critical } else { Warning },
-                format!("{} {} is at {:.0} °C", if disk { "Disk" } else { "GPU" }, sensor.chip, sensor.temp),
+                format!(
+                    "{} {} is at {:.0} °C",
+                    if disk { "Disk" } else { "GPU" },
+                    sensor.chip,
+                    sensor.temp
+                ),
                 if disk {
                     format!("Drives age quickly above {warm:.0} °C and may throttle or fail above {hot:.0} °C.")
                 } else {
-                    format!("{} will throttle above {hot:.0} °C.", if sensor.label.is_empty() { "The GPU" } else { sensor.label.as_str() })
+                    format!(
+                        "{} will throttle above {hot:.0} °C.",
+                        if sensor.label.is_empty() {
+                            "The GPU"
+                        } else {
+                            sensor.label.as_str()
+                        }
+                    )
                 },
                 "Improve the airflow around it; check fans and dust.",
             );
@@ -197,11 +226,19 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
         (!utils.is_empty()).then(|| utils.iter().sum::<f32>() / utils.len() as f32)
     };
     if let Some(util) = util_avg.filter(|u| *u > 85.0) {
-        let busiest = s.disk_io.iter().max_by(|a, b| a.util.unwrap_or(0.0).total_cmp(&b.util.unwrap_or(0.0)));
+        let busiest = s
+            .disk_io
+            .iter()
+            .max_by(|a, b| a.util.unwrap_or(0.0).total_cmp(&b.util.unwrap_or(0.0)));
         let (name, detail) = match busiest {
             Some(d) => (
                 d.name.clone(),
-                format!("Right now it reads {} and writes {} with {:.0} operations per second.", fmt_bytes_rate(d.read_bps), fmt_bytes_rate(d.write_bps), d.iops),
+                format!(
+                    "Right now it reads {} and writes {} with {:.0} operations per second.",
+                    fmt_bytes_rate(d.read_bps),
+                    fmt_bytes_rate(d.write_bps),
+                    d.iops
+                ),
             ),
             None => ("A disk".to_string(), String::new()),
         };
@@ -218,7 +255,12 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
             add(
                 Info,
                 format!("GPU {i} memory is almost full"),
-                format!("{} uses {} of {}; the next allocation may fail.", gpu.name, fmt_bytes(gpu.mem_used), fmt_bytes(gpu.mem_total)),
+                format!(
+                    "{} uses {} of {}; the next allocation may fail.",
+                    gpu.name,
+                    fmt_bytes(gpu.mem_used),
+                    fmt_bytes(gpu.mem_total)
+                ),
                 "See which process holds the memory with `nvidia-smi`.",
             );
         }
@@ -237,7 +279,12 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
         add(
             Info,
             format!("Long-running process uses a full core (pid {})", p.pid),
-            format!("{} has been running for {} at {:.0}% CPU.", short(&p.cmd), fmt_duration(p.elapsed), p.cpu),
+            format!(
+                "{} has been running for {} at {:.0}% CPU.",
+                short(&p.cmd),
+                fmt_duration(p.elapsed),
+                p.cpu
+            ),
             "Verify this is intended work and not a stuck loop.",
         );
     }
@@ -283,9 +330,15 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
                     if failed.len() == 1 {
                         format!("Status: {}.", first.status)
                     } else {
-                        format!("{}. Exit code 137 means killed (out of memory or `docker kill`).", names.join(", "))
+                        format!(
+                            "{}. Exit code 137 means killed (out of memory or `docker kill`).",
+                            names.join(", ")
+                        )
                     },
-                    &format!("Check `docker logs --tail 50 {}`; remove containers that are no longer needed.", first.name),
+                    &format!(
+                        "Check `docker logs --tail 50 {}`; remove containers that are no longer needed.",
+                        first.name
+                    ),
                 );
             }
             for c in list {
@@ -301,7 +354,10 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
                         Warning,
                         format!("Container {} is unhealthy", c.name),
                         format!("Its health check is failing. Status: {}.", c.status),
-                        &format!("Inspect with `docker inspect --format \"{{{{json .State.Health}}}}\" {}`.", c.name),
+                        &format!(
+                            "Inspect with `docker inspect --format \"{{{{json .State.Health}}}}\" {}`.",
+                            c.name
+                        ),
                     );
                 }
                 if c.has_stats && c.mem_limit > 0 {
@@ -311,7 +367,11 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
                         add(
                             Warning,
                             format!("Container {} is at {pct:.0}% of its memory limit", c.name),
-                            format!("{} of {} used; it will be OOM-killed at the limit.", fmt_bytes(c.mem_used), fmt_bytes(c.mem_limit)),
+                            format!(
+                                "{} of {} used; it will be OOM-killed at the limit.",
+                                fmt_bytes(c.mem_used),
+                                fmt_bytes(c.mem_limit)
+                            ),
                             "Raise the limit (`--memory`) or fix the leak.",
                         );
                     } else if !limited && s.mem_total > 0 && c.mem_used > s.mem_total / 3 {
@@ -374,7 +434,12 @@ mod tests {
                 load: [0.5; 3],
                 mem_total: 8 << 30,
                 mem_used: 2 << 30,
-                disks: vec![Disk { mount: "/".into(), fstype: "ext4".into(), total: 100, used: 40 }],
+                disks: vec![Disk {
+                    mount: "/".into(),
+                    fstype: "ext4".into(),
+                    total: 100,
+                    used: 40,
+                }],
                 ..Default::default()
             }),
             ..Default::default()
@@ -405,7 +470,10 @@ mod tests {
         let list = analyze(&state);
         let titles: Vec<&str> = list.iter().map(|s| s.title.as_str()).collect();
         assert!(titles.iter().any(|t| t.contains("Disk / is 97% full")), "{titles:?}");
-        assert!(titles.iter().any(|t| t.contains("Memory almost exhausted")), "{titles:?}");
+        assert!(
+            titles.iter().any(|t| t.contains("Memory almost exhausted")),
+            "{titles:?}"
+        );
         assert!(titles.iter().any(|t| t.contains("restart loop")), "{titles:?}");
         assert!(titles.iter().any(|t| t.contains("zombie")), "{titles:?}");
         assert_eq!(list[0].severity, Severity::Critical);
@@ -418,14 +486,43 @@ mod tests {
         let mut state = healthy();
         let s = state.latest.as_mut().unwrap();
         s.sensors = vec![
-            Sensor { chip: "nvme".into(), label: "Composite".into(), temp: 74.0 },
-            Sensor { chip: "drivetemp".into(), label: String::new(), temp: 61.0 },
-            Sensor { chip: "nct6779".into(), label: "AUXTIN3".into(), temp: 120.0 },
-            Sensor { chip: "GPU 0".into(), label: "RTX".into(), temp: 70.0 },
+            Sensor {
+                chip: "nvme".into(),
+                label: "Composite".into(),
+                temp: 74.0,
+            },
+            Sensor {
+                chip: "drivetemp".into(),
+                label: String::new(),
+                temp: 61.0,
+            },
+            Sensor {
+                chip: "nct6779".into(),
+                label: "AUXTIN3".into(),
+                temp: 120.0,
+            },
+            Sensor {
+                chip: "GPU 0".into(),
+                label: "RTX".into(),
+                temp: 70.0,
+            },
         ];
-        s.disk_io = vec![DiskIo { name: "sda".into(), util: Some(99.0), ..Default::default() }];
-        s.gpus = vec![Gpu { name: "RTX".into(), mem_used: 97, mem_total: 100, ..Default::default() }];
-        state.history.push_back(HistPoint { ts: 990, disk_util: Some(96.0), ..Default::default() });
+        s.disk_io = vec![DiskIo {
+            name: "sda".into(),
+            util: Some(99.0),
+            ..Default::default()
+        }];
+        s.gpus = vec![Gpu {
+            name: "RTX".into(),
+            mem_used: 97,
+            mem_total: 100,
+            ..Default::default()
+        }];
+        state.history.push_back(HistPoint {
+            ts: 990,
+            disk_util: Some(96.0),
+            ..Default::default()
+        });
         let list = analyze(&state);
         let titles: Vec<(Severity, &str)> = list.iter().map(|s| (s.severity, s.title.as_str())).collect();
         assert_eq!(
@@ -438,5 +535,4 @@ mod tests {
             ]
         );
     }
-
 }

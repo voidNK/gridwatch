@@ -60,20 +60,28 @@ impl Tracker {
     fn update(&mut self, current: &[Alert], now: Instant) -> Vec<Alert> {
         let mut new = Vec::new();
         for alert in current {
-            let known = self.seen.get(&alert.key).is_some_and(|(severity, _)| *severity <= alert.severity);
+            let known = self
+                .seen
+                .get(&alert.key)
+                .is_some_and(|(severity, _)| *severity <= alert.severity);
             if !known {
                 new.push(alert.clone());
             }
             self.seen.insert(alert.key.clone(), (alert.severity, now));
         }
-        self.seen.retain(|_, (_, last_seen)| now.duration_since(*last_seen) < FORGET_AFTER);
+        self.seen
+            .retain(|_, (_, last_seen)| now.duration_since(*last_seen) < FORGET_AFTER);
         new
     }
 }
 
 enum Job {
     Sound(Severity, f32),
-    Desktop { summary: String, body: String, critical: bool },
+    Desktop {
+        summary: String,
+        body: String,
+        critical: bool,
+    },
 }
 
 pub struct Notifier {
@@ -93,7 +101,11 @@ impl Notifier {
                 for job in queue {
                     let result = match job {
                         Job::Sound(severity, volume) => play(severity, volume),
-                        Job::Desktop { summary, body, critical } => show(&summary, &body, critical),
+                        Job::Desktop {
+                            summary,
+                            body,
+                            critical,
+                        } => show(&summary, &body, critical),
                     };
                     if let Err(e) = result {
                         eprintln!("gridwatch: notification failed: {e}");
@@ -149,7 +161,11 @@ impl Notifier {
         let mut trackers = self.trackers.lock().unwrap();
         let tracker = trackers.entry(server_id.to_string()).or_default();
         // Tracking continues while muted, so switching alerts back on is not followed by old news.
-        let new: Vec<Alert> = tracker.update(&current, now).into_iter().filter(|a| wanted(a)).collect();
+        let new: Vec<Alert> = tracker
+            .update(&current, now)
+            .into_iter()
+            .filter(|a| wanted(a))
+            .collect();
         if !settings.enabled || open.is_empty() {
             return;
         }
@@ -239,7 +255,11 @@ fn show(summary: &str, body: &str, critical: bool) -> Result<(), String> {
     let mut n = notify_rust::Notification::new();
     n.appname("gridwatch").summary(summary).body(body);
     #[cfg(all(unix, not(target_os = "macos")))]
-    n.urgency(if critical { notify_rust::Urgency::Critical } else { notify_rust::Urgency::Normal });
+    n.urgency(if critical {
+        notify_rust::Urgency::Critical
+    } else {
+        notify_rust::Urgency::Normal
+    });
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     let _ = critical;
     n.show().map(|_| ()).map_err(|e| e.to_string())
@@ -250,7 +270,11 @@ mod tests {
     use super::*;
 
     fn alert(key: &str, severity: Severity) -> Alert {
-        Alert { key: key.into(), severity, title: key.into() }
+        Alert {
+            key: key.into(),
+            severity,
+            title: key.into(),
+        }
     }
 
     #[test]
@@ -263,12 +287,21 @@ mod tests {
 
         // A second problem is reported on its own.
         let load = alert("load", Severity::Warning);
-        assert_eq!(t.update(&[disk.clone(), load.clone()], start + Duration::from_secs(10)), vec![load.clone()]);
+        assert_eq!(
+            t.update(&[disk.clone(), load.clone()], start + Duration::from_secs(10)),
+            vec![load.clone()]
+        );
 
         // Getting worse is news, getting better is not.
         let worse = alert("disk", Severity::Critical);
-        assert_eq!(t.update(&[worse.clone(), load.clone()], start + Duration::from_secs(15)), vec![worse]);
-        assert!(t.update(&[disk.clone(), load], start + Duration::from_secs(20)).is_empty());
+        assert_eq!(
+            t.update(&[worse.clone(), load.clone()], start + Duration::from_secs(15)),
+            vec![worse]
+        );
+        assert!(
+            t.update(&[disk.clone(), load], start + Duration::from_secs(20))
+                .is_empty()
+        );
 
         // Gone briefly and back: still known. Gone for long: reported again.
         assert!(t.update(&[], start + Duration::from_secs(30)).is_empty());
@@ -286,7 +319,12 @@ mod tests {
                 cores: vec![10.0; 4],
                 mem_total: 8 << 30,
                 mem_used: 2 << 30,
-                disks: vec![crate::model::Disk { mount: "/".into(), fstype: "ext4".into(), total: 100, used: 91 }],
+                disks: vec![crate::model::Disk {
+                    mount: "/".into(),
+                    fstype: "ext4".into(),
+                    total: 100,
+                    used: 91,
+                }],
                 ..Default::default()
             }),
             ..Default::default()

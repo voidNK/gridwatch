@@ -42,7 +42,18 @@ pub struct Local {
 /// Adapters that only exist in software would count the same traffic twice.
 fn physical(interface: &str) -> bool {
     let name = interface.to_lowercase();
-    !["loopback", "vethernet", "wsl", "virtual", "vmware", "bluetooth", "tailscale", "wintun"].iter().any(|v| name.contains(v))
+    ![
+        "loopback",
+        "vethernet",
+        "wsl",
+        "virtual",
+        "vmware",
+        "bluetooth",
+        "tailscale",
+        "wintun",
+    ]
+    .iter()
+    .any(|v| name.contains(v))
 }
 
 impl Local {
@@ -69,11 +80,21 @@ impl Local {
         self.networks
             .iter()
             .filter(|(name, _)| physical(&name.to_string_lossy()))
-            .fold((0, 0), |sum, (_, n)| (sum.0 + n.total_received(), sum.1 + n.total_transmitted()))
+            .fold((0, 0), |sum, (_, n)| {
+                (sum.0 + n.total_received(), sum.1 + n.total_transmitted())
+            })
     }
 
     fn net_by_interface(&self) -> HashMap<String, (u64, u64)> {
-        self.networks.iter().map(|(name, n)| (name.to_string_lossy().into_owned(), (n.total_received(), n.total_transmitted()))).collect()
+        self.networks
+            .iter()
+            .map(|(name, n)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    (n.total_received(), n.total_transmitted()),
+                )
+            })
+            .collect()
     }
 
     fn disk_totals(&self) -> HashMap<String, (u64, u64)> {
@@ -98,7 +119,10 @@ impl Local {
         let rate = |now: u64, before: u64| now.saturating_sub(before) as f64 / dt;
 
         let cores: Vec<f32> = self.sys.cpus().iter().map(|c| c.usage()).collect();
-        let mut cpu = CpuUsage { total: self.sys.global_cpu_usage(), ..Default::default() };
+        let mut cpu = CpuUsage {
+            total: self.sys.global_cpu_usage(),
+            ..Default::default()
+        };
         cpu.user = cpu.total;
         let times = system_times();
         if let (Some(now), Some(before)) = (times, self.times) {
@@ -165,7 +189,11 @@ impl Local {
             components.refresh(true);
             for c in components.iter() {
                 if let Some(temp) = c.temperature().filter(|t| (1.0..150.0).contains(t)) {
-                    sensors.push(Sensor { chip: c.label().to_string(), label: String::new(), temp });
+                    sensors.push(Sensor {
+                        chip: c.label().to_string(),
+                        label: String::new(),
+                        temp,
+                    });
                 }
             }
         }
@@ -177,17 +205,30 @@ impl Local {
             .processes()
             .iter()
             .map(|(pid, p)| {
-                let cmd = p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ");
+                let cmd = p
+                    .cmd()
+                    .iter()
+                    .map(|a| a.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 Proc {
                     pid: pid.as_u32(),
-                    user: p.user_id().and_then(|id| self.users.get_user_by_id(id)).map(|u| u.name().to_string()).unwrap_or_default(),
+                    user: p
+                        .user_id()
+                        .and_then(|id| self.users.get_user_by_id(id))
+                        .map(|u| u.name().to_string())
+                        .unwrap_or_default(),
                     state: if p.cpu_usage() > 0.5 { 'R' } else { 'S' },
                     cpu: p.cpu_usage(),
                     mem_pct: p.memory() as f32 / mem_total.max(1) as f32 * 100.0,
                     rss: p.memory(),
                     elapsed: p.run_time(),
                     // The command line of system processes is not readable; the name always is.
-                    cmd: if cmd.is_empty() { p.name().to_string_lossy().into_owned() } else { cmd },
+                    cmd: if cmd.is_empty() {
+                        p.name().to_string_lossy().into_owned()
+                    } else {
+                        cmd
+                    },
                 }
             })
             .collect();
@@ -195,7 +236,7 @@ impl Local {
         // Keep the interesting ones: busiest by CPU plus biggest by memory.
         procs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.rss.cmp(&a.rss)));
         let mut rest = procs.split_off(procs.len().min(120));
-        rest.sort_by(|a, b| b.rss.cmp(&a.rss));
+        rest.sort_by_key(|p| std::cmp::Reverse(p.rss));
         procs.extend(rest.into_iter().take(40));
 
         Sample {
@@ -221,9 +262,16 @@ impl Local {
             proc_count,
             zombies: 0,
             info: HostInfo {
-                kernel: System::kernel_version().map(|v| format!("build {v}")).unwrap_or_default(),
+                kernel: System::kernel_version()
+                    .map(|v| format!("build {v}"))
+                    .unwrap_or_default(),
                 os: System::long_os_version().unwrap_or_else(|_| "Windows".into()),
-                cpu_model: self.sys.cpus().first().map(|c| c.brand().trim().to_string()).unwrap_or_default(),
+                cpu_model: self
+                    .sys
+                    .cpus()
+                    .first()
+                    .map(|c| c.brand().trim().to_string())
+                    .unwrap_or_default(),
                 is_local_windows: true,
                 ..Default::default()
             },
@@ -247,7 +295,12 @@ fn gpus(sensors: &mut Vec<Sensor>) -> Vec<Gpu> {
         return Vec::new();
     }
     let apps = query("--query-compute-apps=used_memory");
-    parse::parse_gpus(&list.lines().collect::<Vec<_>>(), &apps.lines().collect::<Vec<_>>(), &[], sensors)
+    parse::parse_gpus(
+        &list.lines().collect::<Vec<_>>(),
+        &apps.lines().collect::<Vec<_>>(),
+        &[],
+        sensors,
+    )
 }
 
 /// Containers of the docker installation on this computer (Docker Desktop).
@@ -259,7 +312,11 @@ pub fn docker() -> DockerState {
     };
     // Rows have four separators; anything else is an error message from the CLI.
     let failed = ps.lines().any(|l| !l.trim().is_empty() && l.matches('|').count() < 4);
-    let stats = if failed { String::new() } else { run_local("docker", &["stats", "--no-stream", "--no-trunc", "--format", STATS], "").unwrap_or_default() };
+    let stats = if failed {
+        String::new()
+    } else {
+        run_local("docker", &["stats", "--no-stream", "--no-trunc", "--format", STATS], "").unwrap_or_default()
+    };
     let error = if failed { "@@error\n" } else { "" };
     parse::parse_docker(&format!("@@ps\n{ps}\n{error}@@stats\n{stats}\n@@end\n"))
 }

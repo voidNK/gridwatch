@@ -88,7 +88,8 @@ pub fn sort_header(ui: &mut Ui, table: &str, heads: &[&str], text: &[usize]) -> 
                 egui::pos2(center.x + 4.0, center.y - tip),
                 egui::pos2(center.x, center.y + tip),
             ];
-            ui.painter().add(egui::Shape::convex_polygon(points, TEXT, egui::Stroke::NONE));
+            ui.painter()
+                .add(egui::Shape::convex_polygon(points, TEXT, egui::Stroke::NONE));
         }
         if response.clicked() {
             chosen = match chosen {
@@ -145,7 +146,7 @@ pub fn status(ui: &mut Ui, color: Color32, label: &str) {
 }
 
 /// Headline number with a label and a line of context.
-pub fn tile(ui: &mut Ui, label: &str, value: &str, sub: &str, state: Option<(Color32, &str)>) {
+pub fn tile(ui: &mut Ui, label: &str, value: &str, sub: &str, state: Level) {
     card(ui, |ui| {
         ui.set_min_height(74.0);
         ui.label(muted(label));
@@ -159,7 +160,12 @@ pub fn tile(ui: &mut Ui, label: &str, value: &str, sub: &str, state: Option<(Col
     });
 }
 
-pub fn tiles(ui: &mut Ui, items: &[(&str, String, String, Option<(Color32, &str)>)]) {
+/// A coloured state with its label, e.g. red and "critical".
+pub type Level<'a> = Option<(Color32, &'a str)>;
+/// Label, value, subtitle and state of one tile.
+pub type Tile<'a> = (&'a str, String, String, Level<'a>);
+
+pub fn tiles(ui: &mut Ui, items: &[Tile]) {
     ui.columns(items.len(), |cols| {
         for (col, (label, value, sub, state)) in cols.iter_mut().zip(items) {
             tile(col, label, value, sub, *state);
@@ -218,7 +224,11 @@ pub fn fmt_pct(v: f64) -> String {
 }
 
 pub fn fmt_plain(v: f64) -> String {
-    if v.fract().abs() < 1e-9 { format!("{v:.0}") } else { format!("{v:.1}") }
+    if v.fract().abs() < 1e-9 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.1}")
+    }
 }
 
 pub fn fmt_temp(v: f64) -> String {
@@ -226,15 +236,27 @@ pub fn fmt_temp(v: f64) -> String {
 }
 
 pub fn fmt_gib(v: f64) -> String {
-    if v >= 10.0 { format!("{v:.0} GiB") } else { format!("{v:.1} GiB") }
+    if v >= 10.0 {
+        format!("{v:.0} GiB")
+    } else {
+        format!("{v:.1} GiB")
+    }
 }
 
 pub fn fmt_mib_s(v: f64) -> String {
-    if v >= 10.0 { format!("{v:.0} MiB/s") } else { format!("{v:.1} MiB/s") }
+    if v >= 10.0 {
+        format!("{v:.0} MiB/s")
+    } else {
+        format!("{v:.1} MiB/s")
+    }
 }
 
 pub fn fmt_mbit(v: f64) -> String {
-    if v >= 10.0 { format!("{v:.0} Mbit/s") } else { format!("{v:.1} Mbit/s") }
+    if v >= 10.0 {
+        format!("{v:.0} Mbit/s")
+    } else {
+        format!("{v:.1} Mbit/s")
+    }
 }
 
 fn local_time(ts: f64, pattern: &str) -> String {
@@ -318,7 +340,9 @@ pub fn chart(ui: &mut Ui, id: &str, range: (i64, i64), series: Vec<Series>, opt:
         .y_axis_min_width(52.0)
         .link_cursor(egui::Id::unique("gridwatch-time"), [true, false])
         .label_formatter(move |pos| match pos {
-            HoverPosition::NearDataPoint { plot_name, position, .. } => Some(format!(
+            HoverPosition::NearDataPoint {
+                plot_name, position, ..
+            } => Some(format!(
                 "{plot_name}\n{}\n{}",
                 format(position.y),
                 local_time(position.x, hover_pattern)
@@ -346,7 +370,8 @@ pub fn chart(ui: &mut Ui, id: &str, range: (i64, i64), series: Vec<Series>, opt:
                     [egui::pos2(rect.left(), y), egui::pos2(rect.left() + 14.0, y)],
                     Stroke::new(3.0, s.color),
                 );
-                ui.painter().galley(egui::pos2(rect.left() + 20.0, rect.top()), galley, TEXT_SECONDARY);
+                ui.painter()
+                    .galley(egui::pos2(rect.left() + 20.0, rect.top()), galley, TEXT_SECONDARY);
                 response.on_hover_text(&s.name);
             }
         });
@@ -354,7 +379,12 @@ pub fn chart(ui: &mut Ui, id: &str, range: (i64, i64), series: Vec<Series>, opt:
 
     plot.show(ui, |plot_ui| {
         if let Some((value, name)) = opt.reference {
-            plot_ui.hline(HLine::new(name, value).color(MUTED).width(1.0).style(egui_plot::LineStyle::dashed_dense()));
+            plot_ui.hline(
+                HLine::new(name, value)
+                    .color(MUTED)
+                    .width(1.0)
+                    .style(egui_plot::LineStyle::dashed_dense()),
+            );
         }
         for s in series {
             let mut segment: Vec<[f64; 2]> = Vec::new();

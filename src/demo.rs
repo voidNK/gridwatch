@@ -54,12 +54,52 @@ const PROFILES: [Profile; 3] = [
             ("root", "/lib/systemd/systemd-journald", 0.01, 0.3),
         ],
         containers: &[
-            ("proxy", "nginx:1.27-alpine", "running", "Up 3 weeks (healthy)", 0.20, 96, 256),
-            ("api", "registry.example.net/shop/api:4.18.2", "running", "Up 6 days (healthy)", 0.36, 742, 1024),
-            ("postgres", "postgres:17", "running", "Up 3 weeks (healthy)", 0.20, 2210, 4096),
+            (
+                "proxy",
+                "nginx:1.27-alpine",
+                "running",
+                "Up 3 weeks (healthy)",
+                0.20,
+                96,
+                256,
+            ),
+            (
+                "api",
+                "registry.example.net/shop/api:4.18.2",
+                "running",
+                "Up 6 days (healthy)",
+                0.36,
+                742,
+                1024,
+            ),
+            (
+                "postgres",
+                "postgres:17",
+                "running",
+                "Up 3 weeks (healthy)",
+                0.20,
+                2210,
+                4096,
+            ),
             ("redis", "redis:7-alpine", "running", "Up 3 weeks", 0.07, 188, 512),
-            ("worker", "registry.example.net/shop/worker:4.18.2", "running", "Up 6 days", 0.12, 410, 1024),
-            ("migrate", "registry.example.net/shop/api:4.18.2", "exited", "Exited (0) 6 days ago", 0.0, 0, 0),
+            (
+                "worker",
+                "registry.example.net/shop/worker:4.18.2",
+                "running",
+                "Up 6 days",
+                0.12,
+                410,
+                1024,
+            ),
+            (
+                "migrate",
+                "registry.example.net/shop/api:4.18.2",
+                "exited",
+                "Exited (0) 6 days ago",
+                0.0,
+                0,
+                0,
+            ),
         ],
     },
     Profile {
@@ -73,12 +113,21 @@ const PROFILES: [Profile; 3] = [
         mem_pct: 92.5,
         temp: 61.0,
         zombies: 0,
-        drives: &[("nvme0n1", 0.08, "nvme", 44.0), ("sda", 0.88, "drivetemp", 47.0), ("sdb", 0.55, "drivetemp #2", 52.0)],
+        drives: &[
+            ("nvme0n1", 0.08, "nvme", 44.0),
+            ("sda", 0.88, "drivetemp", 47.0),
+            ("sdb", 0.55, "drivetemp #2", 52.0),
+        ],
         gpu: None,
         disks: &[("/", "ext4", 100, 38.0), ("/var/lib/postgresql", "xfs", 1800, 88.0)],
         procs: &[
             ("postgres", "postgres: checkpointer", 0.12, 20.5),
-            ("postgres", "postgres: analytics reports 10.0.0.31(40112) SELECT", 0.41, 28.0),
+            (
+                "postgres",
+                "postgres: analytics reports 10.0.0.31(40112) SELECT",
+                0.41,
+                28.0,
+            ),
             ("postgres", "postgres: walwriter", 0.08, 3.2),
             ("postgres", "postgres: autovacuum worker orders", 0.21, 9.1),
             ("root", "/usr/sbin/pgbouncer /etc/pgbouncer/pgbouncer.ini", 0.05, 0.4),
@@ -102,17 +151,43 @@ const PROFILES: [Profile; 3] = [
         gpu: Some(("NVIDIA RTX A4000", 16)),
         disks: &[("/", "ext4", 120, 96.0)],
         procs: &[
-            ("runner", "rustc --crate-name app --edition=2024 src/main.rs -C opt-level=3", 0.38, 14.0),
+            (
+                "runner",
+                "rustc --crate-name app --edition=2024 src/main.rs -C opt-level=3",
+                0.38,
+                14.0,
+            ),
             ("runner", "cc1plus -quiet -O2 kernel/sched/core.c", 0.27, 6.0),
-            ("runner", "node /opt/ci/node_modules/.bin/webpack --mode production", 0.21, 11.5),
+            (
+                "runner",
+                "node /opt/ci/node_modules/.bin/webpack --mode production",
+                0.21,
+                11.5,
+            ),
             ("root", "/usr/bin/dockerd -H fd://", 0.07, 2.0),
             ("runner", "/opt/ci/agent run --once", 0.04, 1.1),
             ("runner", "[sh] <defunct>", 0.0, 0.0),
         ],
         containers: &[
-            ("ci-agent", "registry.example.net/ci/agent:2.9", "restarting", "Restarting (1) 4 seconds ago", 0.0, 0, 0),
+            (
+                "ci-agent",
+                "registry.example.net/ci/agent:2.9",
+                "restarting",
+                "Restarting (1) 4 seconds ago",
+                0.0,
+                0,
+                0,
+            ),
             ("build-7412", "rust:1.98", "running", "Up 11 minutes", 0.55, 2890, 3072),
-            ("build-7409", "node:24", "exited", "Exited (137) 40 minutes ago", 0.0, 0, 0),
+            (
+                "build-7409",
+                "node:24",
+                "exited",
+                "Exited (137) 40 minutes ago",
+                0.0,
+                0,
+                0,
+            ),
             ("registry-cache", "registry:3", "running", "Up 2 days", 0.04, 120, 0),
         ],
     },
@@ -159,7 +234,8 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
 
     let cores: Vec<f32> = (0..p.cores)
         .map(|i| {
-            let offset = 18.0 * wave(t, 200.0 + 37.0 * i as f64, i as f64 * 0.37) + 6.0 * noise(seed + 10 + i as u64, ts);
+            let offset =
+                18.0 * wave(t, 200.0 + 37.0 * i as f64, i as f64 * 0.37) + 6.0 * noise(seed + 10 + i as u64, ts);
             (total + offset).clamp(0.5, 100.0) as f32
         })
         .collect();
@@ -177,7 +253,13 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
             Proc {
                 pid: 800 + i as u32 * 137 + profile as u32 * 1000,
                 user: user.to_string(),
-                state: if cmd.contains("defunct") { 'Z' } else if cpu > 5.0 { 'R' } else { 'S' },
+                state: if cmd.contains("defunct") {
+                    'Z'
+                } else if cpu > 5.0 {
+                    'R'
+                } else {
+                    'S'
+                },
                 cpu: cpu.max(0.0) as f32,
                 mem_pct: *mem as f32,
                 rss: (mem_total as f64 * mem / 100.0) as u64,
@@ -189,19 +271,39 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
 
     let cpu_temp = p.temp + (total as f32 - p.cpu_base as f32) * 0.25;
     let mut sensors = vec![
-        Sensor { chip: "k10temp".into(), label: "Tctl".into(), temp: cpu_temp },
-        Sensor { chip: "k10temp".into(), label: "Tccd1".into(), temp: cpu_temp - 3.5 },
-        Sensor { chip: "acpitz".into(), label: String::new(), temp: 34.0 + 2.0 * wave(t, 3000.0, 0.4) as f32 },
+        Sensor {
+            chip: "k10temp".into(),
+            label: "Tctl".into(),
+            temp: cpu_temp,
+        },
+        Sensor {
+            chip: "k10temp".into(),
+            label: "Tccd1".into(),
+            temp: cpu_temp - 3.5,
+        },
+        Sensor {
+            chip: "acpitz".into(),
+            label: String::new(),
+            temp: 34.0 + 2.0 * wave(t, 3000.0, 0.4) as f32,
+        },
     ];
     let disk_io: Vec<DiskIo> = p
         .drives
         .iter()
         .enumerate()
         .map(|(i, (name, share, chip, temp))| {
-            let busy = (share * (1.0 + 0.25 * wave(t, 380.0 + 90.0 * i as f64, i as f64 * 0.3) + 0.1 * noise(seed + 30 + i as u64, ts))).clamp(0.01, 1.0);
+            let busy = (share
+                * (1.0
+                    + 0.25 * wave(t, 380.0 + 90.0 * i as f64, i as f64 * 0.3)
+                    + 0.1 * noise(seed + 30 + i as u64, ts)))
+            .clamp(0.01, 1.0);
             sensors.push(Sensor {
                 chip: chip.to_string(),
-                label: if chip.starts_with("nvme") { "Composite".into() } else { String::new() },
+                label: if chip.starts_with("nvme") {
+                    "Composite".into()
+                } else {
+                    String::new()
+                },
                 temp: temp + 4.0 * busy as f32 + wave(t, 2000.0, i as f64 * 0.2) as f32,
             });
             // Spinning disks do far less work for the same share of busy time.
@@ -221,7 +323,11 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
         .map(|(name, gb)| {
             let util = (62.0 + 30.0 * wave(t, 520.0, 0.2) + 6.0 * noise(seed + 40, ts)).clamp(0.0, 100.0);
             let temp = 58.0 + util as f32 * 0.2;
-            sensors.push(Sensor { chip: "GPU 0".into(), label: name.to_string(), temp });
+            sensors.push(Sensor {
+                chip: "GPU 0".into(),
+                label: name.to_string(),
+                temp,
+            });
             Gpu {
                 name: name.to_string(),
                 util: util as f32,
@@ -233,7 +339,10 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
         })
         .collect();
 
-    let (rx, tx) = (2.4e6 * traffic * (1.0 + 0.2 * noise(seed + 3, ts)), 6.1e6 * traffic * (1.0 + 0.2 * noise(seed + 4, ts)));
+    let (rx, tx) = (
+        2.4e6 * traffic * (1.0 + 0.2 * noise(seed + 3, ts)),
+        6.1e6 * traffic * (1.0 + 0.2 * noise(seed + 4, ts)),
+    );
     // Two ports share the traffic; the bridge repeats what the containers send.
     let backup = 0.18 + 0.1 * wave(t, 700.0, 0.3);
     let since_boot = |bps: f64| (bps * (40.0 * 86400.0 + (ts % 86400) as f64) * 0.7) as u64;
@@ -245,7 +354,11 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
         tx_total: since_boot(6.1e6 * share),
         physical,
     };
-    let mut net = vec![iface("eth0", 1.0 - backup, true), iface("eth1", backup, true), iface("lo", 0.04, false)];
+    let mut net = vec![
+        iface("eth0", 1.0 - backup, true),
+        iface("eth1", backup, true),
+        iface("lo", 0.04, false),
+    ];
     if !p.containers.is_empty() {
         net.push(iface("docker0", 0.55, false));
     }
@@ -311,7 +424,9 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
                 .enumerate()
                 .map(|(i, (name, image, state, status, share, mem, limit))| {
                     let running = *state == "running";
-                    let wobble = 1.0 + 0.2 * wave(t, 260.0 + 45.0 * i as f64, i as f64 * 0.21) + 0.08 * noise(seed + 70 + i as u64, ts);
+                    let wobble = 1.0
+                        + 0.2 * wave(t, 260.0 + 45.0 * i as f64, i as f64 * 0.21)
+                        + 0.08 * noise(seed + 70 + i as u64, ts);
                     Container {
                         id: format!("{:012x}", (i as u64 + 1) * 0x9E37_79B9 + seed),
                         name: name.to_string(),
@@ -322,8 +437,16 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
                         cpu: (share * total * p.cores as f64 * wobble).max(0.0) as f32,
                         mem_used: ((mem << 20) as f64 * (1.0 + 0.04 * wave(t, 1300.0, i as f64 * 0.4))) as u64,
                         mem_limit: if *limit == 0 { mem_total } else { limit << 20 },
-                        net: if running { format!("{:.1}GB / {:.1}GB", 1.2 + i as f64, 3.4 + i as f64 * 2.0) } else { String::new() },
-                        block: if running { format!("{}MB / {}MB", 120 * (i + 1), 48 * (i + 1)) } else { String::new() },
+                        net: if running {
+                            format!("{:.1}GB / {:.1}GB", 1.2 + i as f64, 3.4 + i as f64 * 2.0)
+                        } else {
+                            String::new()
+                        },
+                        block: if running {
+                            format!("{}MB / {}MB", 120 * (i + 1), 48 * (i + 1))
+                        } else {
+                            String::new()
+                        },
                         pids: if running { 4 + i as u32 * 7 } else { 0 },
                     }
                 })

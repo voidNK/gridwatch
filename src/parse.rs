@@ -184,7 +184,13 @@ const VIRTUAL_DISKS: [&str; 8] = ["loop", "ram", "zram", "sr", "fd", "dm-", "md"
 
 /// Build the sensor list from `dir|chip|label|millidegrees` (hwmon) and `type|millidegrees` (thermal zones).
 fn parse_sensors(hwmon: &[&str], zones: &[&str]) -> Vec<Sensor> {
-    let reading = |v: &str| v.trim().parse::<f32>().ok().map(|v| v / 1000.0).filter(|v| (1.0..150.0).contains(v));
+    let reading = |v: &str| {
+        v.trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| v / 1000.0)
+            .filter(|v| (1.0..150.0).contains(v))
+    };
     let mut out = Vec::new();
     // Two chips of the same driver (two NVMe disks) get a number.
     let mut dirs: Vec<(&str, &str)> = Vec::new();
@@ -196,10 +202,18 @@ fn parse_sensors(hwmon: &[&str], zones: &[&str]) -> Vec<Sensor> {
         if !dirs.contains(&(f[0], f[1])) {
             dirs.push((f[0], f[1]));
         }
-        let nth = dirs.iter().filter(|d| d.1 == f[1]).position(|d| d.0 == f[0]).unwrap_or(0);
+        let nth = dirs
+            .iter()
+            .filter(|d| d.1 == f[1])
+            .position(|d| d.0 == f[0])
+            .unwrap_or(0);
         if let Some(temp) = reading(f[3]) {
             out.push(Sensor {
-                chip: if nth == 0 { f[1].to_string() } else { format!("{} #{}", f[1], nth + 1) },
+                chip: if nth == 0 {
+                    f[1].to_string()
+                } else {
+                    format!("{} #{}", f[1], nth + 1)
+                },
                 label: f[2].trim().to_string(),
                 temp,
             });
@@ -207,7 +221,9 @@ fn parse_sensors(hwmon: &[&str], zones: &[&str]) -> Vec<Sensor> {
     }
     // Thermal zones usually repeat what hwmon already reports.
     for (i, line) in zones.iter().enumerate() {
-        let Some((kind, value)) = line.split_once('|') else { continue };
+        let Some((kind, value)) = line.split_once('|') else {
+            continue;
+        };
         if kind.is_empty() || dirs.iter().any(|d| d.1 == kind) {
             continue;
         }
@@ -245,10 +261,10 @@ pub fn parse_gpus(nvidia: &[&str], apps: &[&str], drm: &[&str], sensors: &mut Ve
         });
     }
     // A GPU that shares the system memory reports no usage of its own; its processes do.
-    if let [gpu] = out.as_mut_slice() {
-        if gpu.mem_total == 0 {
-            gpu.mem_used = (apps.iter().filter_map(|l| l.trim().parse::<f64>().ok()).sum::<f64>() * MIB) as u64;
-        }
+    if let [gpu] = out.as_mut_slice()
+        && gpu.mem_total == 0
+    {
+        gpu.mem_used = (apps.iter().filter_map(|l| l.trim().parse::<f64>().ok()).sum::<f64>() * MIB) as u64;
     }
     for line in drm {
         let f: Vec<&str> = line.split('|').collect();
@@ -277,7 +293,13 @@ pub fn parse_gpus(nvidia: &[&str], apps: &[&str], drm: &[&str], sensors: &mut Ve
 
 /// The one temperature that stands for the machine: the CPU if it has a sensor.
 pub fn main_temp(sensors: &[Sensor]) -> Option<f32> {
-    let hottest = |kinds: &[SensorKind]| sensors.iter().filter(|s| kinds.contains(&s.kind())).map(|s| s.temp).reduce(f32::max);
+    let hottest = |kinds: &[SensorKind]| {
+        sensors
+            .iter()
+            .filter(|s| kinds.contains(&s.kind()))
+            .map(|s| s.temp)
+            .reduce(f32::max)
+    };
     hottest(&[SensorKind::Cpu]).or_else(|| hottest(&[SensorKind::Other]))
 }
 
@@ -373,7 +395,20 @@ pub fn parse_system(text: &str) -> Result<RawSystem> {
         };
         let iface = iface.trim();
         // Loopback and container plumbing carry traffic that a real port already counted.
-        const VIRTUAL: [&str; 12] = ["veth", "docker", "br-", "virbr", "tun", "tap", "wg", "tailscale", "cni", "flannel", "cali", "bond"];
+        const VIRTUAL: [&str; 12] = [
+            "veth",
+            "docker",
+            "br-",
+            "virbr",
+            "tun",
+            "tap",
+            "wg",
+            "tailscale",
+            "cni",
+            "flannel",
+            "cali",
+            "bond",
+        ];
         let physical = iface != "lo" && !VIRTUAL.iter().any(|p| iface.starts_with(p));
         let f: Vec<u64> = rest.split_whitespace().map(|x| x.parse().unwrap_or(0)).collect();
         if f.len() >= 9 {
@@ -386,8 +421,8 @@ pub fn parse_system(text: &str) -> Result<RawSystem> {
     }
 
     const PSEUDO_FS: [&str; 12] = [
-        "9p", "drvfs", "iso9660", "erofs",
-        "tmpfs", "devtmpfs", "overlay", "squashfs", "efivarfs", "proc", "sysfs", "nsfs",
+        "9p", "drvfs", "iso9660", "erofs", "tmpfs", "devtmpfs", "overlay", "squashfs", "efivarfs", "proc", "sysfs",
+        "nsfs",
     ];
     for line in get("df").iter().skip(1) {
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -443,8 +478,7 @@ pub fn parse_system(text: &str) -> Result<RawSystem> {
         let f: Vec<&str> = line[close + 1..].split_whitespace().collect();
         if f.len() > 12 {
             let ticks = f[11].parse::<u64>().unwrap_or(0) + f[12].parse::<u64>().unwrap_or(0);
-            raw.proc_ticks
-                .insert(pid, (ticks, f[0].chars().next().unwrap_or('?')));
+            raw.proc_ticks.insert(pid, (ticks, f[0].chars().next().unwrap_or('?')));
         }
     }
 
@@ -487,7 +521,9 @@ fn parse_clock(s: &str) -> f64 {
         Some((d, rest)) => (d.parse::<f64>().unwrap_or(0.0), rest),
         None => (0.0, s),
     };
-    rest.split(':').fold(0.0, |acc, part| acc * 60.0 + part.parse::<f64>().unwrap_or(0.0)) + days * 86400.0
+    rest.split(':')
+        .fold(0.0, |acc, part| acc * 60.0 + part.parse::<f64>().unwrap_or(0.0))
+        + days * 86400.0
 }
 
 /// Rows of `df -P`, with or without a filesystem type column: (type, total, available, mount).
@@ -503,7 +539,12 @@ fn df_rows<'a>(lines: &[&'a str]) -> Vec<(&'a str, u64, u64, String)> {
                 return None;
             }
             let kib = |i: usize| f[i].parse::<u64>().unwrap_or(0) * 1024;
-            Some((if typed { f[1] } else { "" }, kib(first), kib(first + 2), f[first + 4..].join(" ")))
+            Some((
+                if typed { f[1] } else { "" },
+                kib(first),
+                kib(first + 2),
+                f[first + 4..].join(" "),
+            ))
         })
         .collect()
 }
@@ -536,10 +577,19 @@ fn parse_mac(sec: &HashMap<&str, Vec<&str>>) -> Result<RawSystem> {
     }
     if raw.cores.is_empty() {
         // "CPU usage: 5.31% user, 3.77% sys, 90.90% idle" - the last line covers the last second.
-        let line = get("top").last().context("no CPU data from the Mac (neither python3 nor top answered)")?;
+        let line = get("top")
+            .last()
+            .context("no CPU data from the Mac (neither python3 nor top answered)")?;
         let pct = |label: &str| {
             line.split([':', ','])
-                .find_map(|part| part.trim().strip_suffix(label)?.trim().trim_end_matches('%').parse::<f32>().ok())
+                .find_map(|part| {
+                    part.trim()
+                        .strip_suffix(label)?
+                        .trim()
+                        .trim_end_matches('%')
+                        .parse::<f32>()
+                        .ok()
+                })
                 .unwrap_or(0.0)
         };
         raw.cpu_direct = Some(CpuUsage {
@@ -554,7 +604,12 @@ fn parse_mac(sec: &HashMap<&str, Vec<&str>>) -> Result<RawSystem> {
 
     // "{ 2.20 2.16 2.10 }"
     let load = sysctl.get("load").copied().unwrap_or("");
-    for (i, v) in load.split_whitespace().filter_map(|v| v.replace(',', ".").parse().ok()).take(3).enumerate() {
+    for (i, v) in load
+        .split_whitespace()
+        .filter_map(|v| v.replace(',', ".").parse().ok())
+        .take(3)
+        .enumerate()
+    {
         raw.load[i] = v;
     }
 
@@ -562,7 +617,12 @@ fn parse_mac(sec: &HashMap<&str, Vec<&str>>) -> Result<RawSystem> {
     let pages: HashMap<&str, u64> = get("vmstat")
         .iter()
         .filter_map(|l| l.split_once(':'))
-        .map(|(k, v)| (k.trim().trim_matches('"'), v.trim().trim_end_matches('.').parse().unwrap_or(0)))
+        .map(|(k, v)| {
+            (
+                k.trim().trim_matches('"'),
+                v.trim().trim_end_matches('.').parse().unwrap_or(0),
+            )
+        })
         .collect();
     let page = |k: &str| pages.get(k).copied().unwrap_or(0);
     raw.mem_total = number("memsize");
@@ -591,7 +651,10 @@ fn parse_mac(sec: &HashMap<&str, Vec<&str>>) -> Result<RawSystem> {
         let f: Vec<&str> = line.split_whitespace().collect();
         if f.len() >= 9 && f[2].starts_with("<Link") {
             let name = f[0].trim_end_matches('*');
-            let (rx, tx) = (f[f.len() - 5].parse::<u64>().unwrap_or(0), f[f.len() - 2].parse::<u64>().unwrap_or(0));
+            let (rx, tx) = (
+                f[f.len() - 5].parse::<u64>().unwrap_or(0),
+                f[f.len() - 2].parse::<u64>().unwrap_or(0),
+            );
             let physical = name.starts_with("en");
             if physical {
                 raw.net_rx += rx;
@@ -604,8 +667,13 @@ fn parse_mac(sec: &HashMap<&str, Vec<&str>>) -> Result<RawSystem> {
     // APFS volumes share one container: the data volume stands for the internal disk,
     // and what is not available counts as used.
     for (fstype, total, available, mount) in df_rows(get("df")) {
-        let mount = if mount == "/System/Volumes/Data" { "/".to_string() } else { mount };
-        if total == 0 || !(mount == "/" || mount.starts_with("/Volumes/")) || raw.disks.iter().any(|d| d.mount == mount) {
+        let mount = if mount == "/System/Volumes/Data" {
+            "/".to_string()
+        } else {
+            mount
+        };
+        if total == 0 || !(mount == "/" || mount.starts_with("/Volumes/")) || raw.disks.iter().any(|d| d.mount == mount)
+        {
             continue;
         }
         raw.disks.push(Disk {
@@ -619,7 +687,10 @@ fn parse_mac(sec: &HashMap<&str, Vec<&str>>) -> Result<RawSystem> {
     // One line per disk driver: {"Operations (Write)"=14730925,...,"Bytes (Read)"=747853242368,...}
     for line in get("ioreg") {
         let n = |key: &str| {
-            let value = line.split(&format!("\"{key}\"=")).nth(1).and_then(|v| v.split([',', '}']).next());
+            let value = line
+                .split(&format!("\"{key}\"="))
+                .nth(1)
+                .and_then(|v| v.split([',', '}']).next());
             value.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0)
         };
         let (read_bytes, write_bytes) = (n("Bytes (Read)"), n("Bytes (Write)"));
@@ -636,7 +707,10 @@ fn parse_mac(sec: &HashMap<&str, Vec<&str>>) -> Result<RawSystem> {
     }
 
     // macmon prints one JSON object: {"temp":{"cpu_temp_avg":34.9,"gpu_temp_avg":37.1},...}
-    if let Some(v) = get("macmon").first().and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+    if let Some(v) = get("macmon")
+        .first()
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+    {
         // "gpu_usage":[frequency in MHz, share of time busy]
         if let Some(busy) = v["gpu_usage"][1].as_f64() {
             raw.gpus.push(Gpu {
@@ -724,7 +798,7 @@ pub fn build_sample(prev: &RawSystem, cur: &RawSystem, dt: f64, ts: i64) -> Samp
     // Keep the interesting ones: busiest by CPU plus biggest by memory.
     procs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.rss.cmp(&a.rss)));
     let mut rest = procs.split_off(procs.len().min(120));
-    rest.sort_by(|a, b| b.rss.cmp(&a.rss));
+    rest.sort_by_key(|p| std::cmp::Reverse(p.rss));
     procs.extend(rest.into_iter().take(40));
 
     // Interfaces that never carried anything (unused ports) are left out.
@@ -754,7 +828,10 @@ pub fn build_sample(prev: &RawSystem, cur: &RawSystem, dt: f64, ts: i64) -> Samp
                 read_bps: rate(c.read_bytes, p.read_bytes),
                 write_bps: rate(c.write_bytes, p.write_bytes),
                 iops: rate(c.ops, p.ops),
-                util: c.busy_ms.zip(p.busy_ms).map(|(now, before)| (rate(now, before) / 10.0).clamp(0.0, 100.0) as f32),
+                util: c
+                    .busy_ms
+                    .zip(p.busy_ms)
+                    .map(|(now, before)| (rate(now, before) / 10.0).clamp(0.0, 100.0) as f32),
             })
         })
         .collect();
@@ -765,7 +842,12 @@ pub fn build_sample(prev: &RawSystem, cur: &RawSystem, dt: f64, ts: i64) -> Samp
         cores: match cur.cpu_direct {
             // No per-core data: every core stands at the average, so core counts stay right.
             Some(cpu) => vec![cpu.total; cur.core_count],
-            None => cur.cores.iter().zip(&prev.cores).map(|(c, p)| c.usage_since(p).total).collect(),
+            None => cur
+                .cores
+                .iter()
+                .zip(&prev.cores)
+                .map(|(c, p)| c.usage_since(p).total)
+                .collect(),
         },
         freqs: cur.freqs.clone(),
         load: cur.load,
@@ -817,7 +899,11 @@ pub fn parse_docker(text: &str) -> DockerState {
         return DockerState::Error("no output from docker".into());
     };
     if sec.contains_key("error") {
-        let msg = sec["error"].first().or(ps.first()).copied().unwrap_or("docker ps failed");
+        let msg = sec["error"]
+            .first()
+            .or(ps.first())
+            .copied()
+            .unwrap_or("docker ps failed");
         return DockerState::Error(msg.trim().to_string());
     }
     let mut list: Vec<Container> = ps
@@ -893,8 +979,20 @@ mod tests {
 
     #[test]
     fn parses_and_derives_rates() {
-        let a = parse_system(&system_output("cpu  100 0 100 800 0 0 0 0", "cpu0 100 0 100 800 0 0 0 0", 1000, 100)).unwrap();
-        let b = parse_system(&system_output("cpu  150 0 120 1020 10 0 0 0", "cpu0 150 0 120 1020 10 0 0 0", 6000, 350)).unwrap();
+        let a = parse_system(&system_output(
+            "cpu  100 0 100 800 0 0 0 0",
+            "cpu0 100 0 100 800 0 0 0 0",
+            1000,
+            100,
+        ))
+        .unwrap();
+        let b = parse_system(&system_output(
+            "cpu  150 0 120 1020 10 0 0 0",
+            "cpu0 150 0 120 1020 10 0 0 0",
+            6000,
+            350,
+        ))
+        .unwrap();
         let s = build_sample(&a, &b, 5.0, 1);
 
         // delta: user 50, system 20, idle 220, iowait 10 => total 300
@@ -908,11 +1006,26 @@ mod tests {
         assert_eq!(s.swap_used, 500_000 * 1024);
         assert_eq!(s.uptime, 86400);
         assert_eq!(s.rx_bps, 1000.0); // lo and veth are ignored
-        let net: Vec<(&str, f64, u64, bool)> = s.net.iter().map(|n| (n.name.as_str(), n.rx_bps, n.rx_total, n.physical)).collect();
-        assert_eq!(net, vec![("lo", 0.0, 500, false), ("eth0", 1000.0, 6000, true), ("veth1a", 0.0, 9999, false)]);
+        let net: Vec<(&str, f64, u64, bool)> = s
+            .net
+            .iter()
+            .map(|n| (n.name.as_str(), n.rx_bps, n.rx_total, n.physical))
+            .collect();
+        assert_eq!(
+            net,
+            vec![
+                ("lo", 0.0, 500, false),
+                ("eth0", 1000.0, 6000, true),
+                ("veth1a", 0.0, 9999, false)
+            ]
+        );
         // The CPU sensor counts, not the hotter (and unreliable) mainboard input.
         assert_eq!(s.temp, Some(61.5));
-        let sensors: Vec<(&str, &str, f32)> = s.sensors.iter().map(|x| (x.chip.as_str(), x.label.as_str(), x.temp)).collect();
+        let sensors: Vec<(&str, &str, f32)> = s
+            .sensors
+            .iter()
+            .map(|x| (x.chip.as_str(), x.label.as_str(), x.temp))
+            .collect();
         assert_eq!(
             sensors,
             vec![
@@ -931,13 +1044,22 @@ mod tests {
 
         assert_eq!(s.gpus.len(), 2);
         let g = &s.gpus[0];
-        assert_eq!((g.util, g.mem_used, g.mem_total, g.power), (37.0, 8192 << 20, 32768 << 20, Some(210.5)));
-        assert_eq!((s.gpus[1].name.as_str(), s.gpus[1].util, s.gpus[1].mem_total), ("AMD GPU (card1)", 12.0, 8388608));
+        assert_eq!(
+            (g.util, g.mem_used, g.mem_total, g.power),
+            (37.0, 8192 << 20, 32768 << 20, Some(210.5))
+        );
+        assert_eq!(
+            (s.gpus[1].name.as_str(), s.gpus[1].util, s.gpus[1].mem_total),
+            ("AMD GPU (card1)", 12.0, 8388608)
+        );
 
         // Only the whole disk counts: no loop device, partition or device mapper volume.
         assert_eq!(s.disk_io.len(), 1);
         let d = &s.disk_io[0];
-        assert_eq!((d.name.as_str(), d.read_bps, d.write_bps, d.iops, d.util), ("sda", 102_400.0, 0.0, 0.0, Some(50.0)));
+        assert_eq!(
+            (d.name.as_str(), d.read_bps, d.write_bps, d.iops, d.util),
+            ("sda", 102_400.0, 0.0, 0.0, Some(50.0))
+        );
         assert_eq!(s.freqs, vec![3400.0]);
         assert!(s.info.reboot_required);
         assert_eq!(s.info.cpu_model, "Test CPU");
@@ -991,7 +1113,10 @@ mod tests {
     fn live_host() {
         let host = std::env::var("GRIDWATCH_TEST_HOST").expect("set GRIDWATCH_TEST_HOST");
         let poll = || {
-            let out = std::process::Command::new("ssh").args(["-o", "BatchMode=yes", &host, &wrap(&system_script())]).output().unwrap();
+            let out = std::process::Command::new("ssh")
+                .args(["-o", "BatchMode=yes", &host, &wrap(&system_script())])
+                .output()
+                .unwrap();
             parse_system(&String::from_utf8_lossy(&out.stdout)).unwrap()
         };
         let a = poll();
@@ -1000,16 +1125,27 @@ mod tests {
         let b = poll();
         let mut s = build_sample(&a, &b, 3.0 + started.elapsed().as_secs_f64(), 0);
         s.procs.truncate(6);
-        println!("poll took {:?}
-{s:#?}", started.elapsed());
+        println!(
+            "poll took {:?}
+{s:#?}",
+            started.elapsed()
+        );
         assert!(!s.cores.is_empty() && s.mem_total > 0 && !s.disks.is_empty() && s.proc_count > 0);
     }
 
     #[test]
     fn gpu_with_shared_memory_takes_usage_from_its_processes() {
         let mut sensors = Vec::new();
-        let gpus = parse_gpus(&["0, NVIDIA GB10, 0, [N/A], [N/A], 39, 9.48"], &["170", "170"], &[], &mut sensors);
-        assert_eq!((gpus[0].mem_used, gpus[0].mem_total, gpus[0].temp), (340 << 20, 0, Some(39.0)));
+        let gpus = parse_gpus(
+            &["0, NVIDIA GB10, 0, [N/A], [N/A], 39, 9.48"],
+            &["170", "170"],
+            &[],
+            &mut sensors,
+        );
+        assert_eq!(
+            (gpus[0].mem_used, gpus[0].mem_total, gpus[0].temp),
+            (340 << 20, 0, Some(39.0))
+        );
         assert_eq!(sensors.len(), 1);
     }
 
@@ -1059,7 +1195,12 @@ mod tests {
     #[test]
     fn parses_macos_with_per_core_counters() {
         let a = parse_system(&mac_output("@@cores\n0 100 0 100 800\n1 0 0 0 1000", "949:08.11", 1000)).unwrap();
-        let b = parse_system(&mac_output("@@cores\n0 300 50 150 1000\n1 0 0 0 1500", "949:10.61", 6000)).unwrap();
+        let b = parse_system(&mac_output(
+            "@@cores\n0 300 50 150 1000\n1 0 0 0 1500",
+            "949:10.61",
+            6000,
+        ))
+        .unwrap();
         let s = build_sample(&a, &b, 5.0, 1);
 
         // core 0: user 250, system 50, idle 200 of 500; core 1 idle
@@ -1076,16 +1217,25 @@ mod tests {
         assert_eq!(s.uptime, 86400);
         assert_eq!(s.rx_bps, 1000.0); // lo0, utun0 and the address rows are ignored
         let net: Vec<(&str, f64, bool)> = s.net.iter().map(|n| (n.name.as_str(), n.rx_bps, n.physical)).collect();
-        assert_eq!(net, vec![("lo0", 0.0, false), ("en0", 1000.0, true), ("utun0", 0.0, false)]);
+        assert_eq!(
+            net,
+            vec![("lo0", 0.0, false), ("en0", 1000.0, true), ("utun0", 0.0, false)]
+        );
         assert_eq!(s.info.os, "macOS 26.7");
         assert!(s.info.is_mac);
         assert_eq!(s.temp, Some(34.5));
         assert_eq!(s.sensors.len(), 2);
         assert_eq!((s.sensors[1].kind(), s.sensors[1].temp), (SensorKind::Gpu, 37.25));
         assert_eq!(s.gpus.len(), 1);
-        assert_eq!((s.gpus[0].util, s.gpus[0].mem_total, s.gpus[0].temp, s.gpus[0].power), (25.0, 0, Some(37.25), Some(0.5)));
+        assert_eq!(
+            (s.gpus[0].util, s.gpus[0].mem_total, s.gpus[0].temp, s.gpus[0].power),
+            (25.0, 0, Some(37.25), Some(0.5))
+        );
         assert_eq!(s.disk_io.len(), 1);
-        assert_eq!((s.disk_io[0].name.as_str(), s.disk_io[0].read_bps, s.disk_io[0].util), ("disk0", 1000.0, None));
+        assert_eq!(
+            (s.disk_io[0].name.as_str(), s.disk_io[0].read_bps, s.disk_io[0].util),
+            ("disk0", 1000.0, None)
+        );
 
         // The data volume stands for the internal disk; used = total - available.
         let disks: Vec<(&str, f32)> = s.disks.iter().map(|d| (d.mount.as_str(), d.pct().round())).collect();
@@ -1102,7 +1252,8 @@ mod tests {
 
     #[test]
     fn parses_macos_without_python() {
-        let top = "@@top\nCPU usage: 2.57% user, 6.6% sys, 91.36% idle \nCPU usage: 5.31% user, 3.77% sys, 90.90% idle ";
+        let top =
+            "@@top\nCPU usage: 2.57% user, 6.6% sys, 91.36% idle \nCPU usage: 5.31% user, 3.77% sys, 90.90% idle ";
         let a = parse_system(&mac_output(top, "0:01.00", 0)).unwrap();
         let s = build_sample(&a, &a, 5.0, 1);
         assert!((s.cpu.total - 9.1).abs() < 0.01);

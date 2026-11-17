@@ -59,7 +59,11 @@ pub fn run_local(program: &str, args: &[&str], input: &str) -> Result<String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut command = Command::new(program);
-    command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -84,7 +88,10 @@ enum Source {
     Ssh(Session),
     /// A shell on this computer that reads the script from its standard input,
     /// which avoids every quoting problem (`sh`, or `wsl.exe -e sh`).
-    Shell { program: &'static str, args: &'static [&'static str] },
+    Shell {
+        program: &'static str,
+        args: &'static [&'static str],
+    },
 }
 
 impl Source {
@@ -143,7 +150,10 @@ pub fn spawn_local(rt: &tokio::runtime::Handle, cfg: ServerConfig, shared: Share
             set_conn(&shared, &env, ConnState::Connecting);
             let err = match cfg.kind {
                 ServerKind::Wsl => {
-                    let source = Source::Shell { program: "wsl.exe", args: &["-e", "sh"] };
+                    let source = Source::Shell {
+                        program: "wsl.exe",
+                        args: &["-e", "sh"],
+                    };
                     poll_loop(&source, &cfg, &shared, &env).await.unwrap_err()
                 }
                 _ => local_loop(&cfg, &shared, &env).await.unwrap_err(),
@@ -158,7 +168,10 @@ pub fn spawn_local(rt: &tokio::runtime::Handle, cfg: ServerConfig, shared: Share
 /// Linux and macOS answer the same scripts locally that they answer over SSH.
 #[cfg(not(windows))]
 async fn local_loop(cfg: &ServerConfig, shared: &Shared, env: &Env) -> Result<()> {
-    let source = Source::Shell { program: "sh", args: &[] };
+    let source = Source::Shell {
+        program: "sh",
+        args: &[],
+    };
     poll_loop(&source, cfg, shared, env).await
 }
 
@@ -247,8 +260,21 @@ mod tests {
     #[test]
     #[ignore]
     fn local_shell() {
-        let source = if cfg!(windows) { Source::Shell { program: "wsl.exe", args: &["-e", "sh"] } } else { Source::Shell { program: "sh", args: &[] } };
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let source = if cfg!(windows) {
+            Source::Shell {
+                program: "wsl.exe",
+                args: &["-e", "sh"],
+            }
+        } else {
+            Source::Shell {
+                program: "sh",
+                args: &[],
+            }
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let (a, _) = poll_system(&source).await.unwrap();
             tokio::time::sleep(Duration::from_secs(2)).await;

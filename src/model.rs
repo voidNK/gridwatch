@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 pub enum AuthMethod {
     /// SSH agent first, then the default key files in `~/.ssh`.
     Auto,
-    KeyFile { path: String },
+    KeyFile {
+        path: String,
+    },
     Password,
 }
 
@@ -49,7 +51,12 @@ impl ServerConfig {
         let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
         let host = env("COMPUTERNAME")
             .or_else(|| env("HOSTNAME"))
-            .or_else(|| std::fs::read_to_string("/etc/hostname").ok().map(|h| h.trim().to_string()).filter(|h| !h.is_empty()))
+            .or_else(|| {
+                std::fs::read_to_string("/etc/hostname")
+                    .ok()
+                    .map(|h| h.trim().to_string())
+                    .filter(|h| !h.is_empty())
+            })
             .unwrap_or_else(|| "This computer".to_string());
         let wsl = kind == ServerKind::Wsl;
         Self {
@@ -352,7 +359,13 @@ impl HistPoint {
             temps: chip_temps(&s.sensors),
             gpus: s.gpus.iter().map(|g| (g.util, g.mem_used)).collect(),
             // Container interfaces come and go under random names; their history would only be noise.
-            nets: s.net.iter().filter(|n| !n.name.starts_with("veth")).take(16).map(|n| (n.name.clone(), n.rx_bps, n.tx_bps)).collect(),
+            nets: s
+                .net
+                .iter()
+                .filter(|n| !n.name.starts_with("veth"))
+                .take(16)
+                .map(|n| (n.name.clone(), n.rx_bps, n.tx_bps))
+                .collect(),
         }
     }
 }
