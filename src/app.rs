@@ -94,7 +94,6 @@ pub struct App {
     confirm_remove: bool,
     secret_input: String,
     proc_filter: String,
-    proc_by_memory: bool,
     last_prune: Instant,
     screenshots: Option<Screenshots>,
 }
@@ -170,7 +169,6 @@ impl App {
             confirm_remove: false,
             secret_input: String::new(),
             proc_filter: String::new(),
-            proc_by_memory: false,
             last_prune: Instant::now(),
             screenshots,
             config,
@@ -735,13 +733,13 @@ Click to switch on or off.");
                 ui.horizontal(|ui| {
                     for (tab, label) in [
                         (Tab::Overview, "Overview".to_string()),
+                        (Tab::Gpu, if sample.gpus.len() > 1 { format!("GPU ({})", sample.gpus.len()) } else { "GPU".to_string() }),
                         (Tab::Cpu, "CPU".to_string()),
                         (Tab::Cores, format!("Cores ({})", sample.cores.len())),
                         (Tab::Processes, format!("Processes ({})", sample.proc_count)),
                         (Tab::Network, "Network".to_string()),
                         (Tab::Disks, "Disks".to_string()),
                         (Tab::Temps, "Temperatures".to_string()),
-                        (Tab::Gpu, if sample.gpus.len() > 1 { format!("GPU ({})", sample.gpus.len()) } else { "GPU".to_string() }),
                         (Tab::Docker, "Docker".to_string()),
                         (Tab::Suggestions, if alerts > 0 { format!("Suggestions ({alerts})") } else { "Suggestions".to_string() }),
                     ] {
@@ -757,13 +755,13 @@ Click to switch on or off.");
                     self.tab = Tab::Overview;
                 }
                 let tab = self.tab;
-                let (filter, by_memory) = (&mut self.proc_filter, &mut self.proc_by_memory);
+                let filter = &mut self.proc_filter;
                 let slots = &mut server.color_slots;
                 ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match tab {
                     Tab::Overview => overview_tab(ui, &state, sample, range),
                     Tab::Cpu => cpu_tab(ui, &state, sample, range),
                     Tab::Cores => cores_tab(ui, &state, sample, range),
-                    Tab::Processes => processes_tab(ui, sample, filter, by_memory),
+                    Tab::Processes => processes_tab(ui, sample, filter),
                     Tab::Network => network_tab(ui, &state, sample, range),
                     Tab::Disks => disks_tab(ui, &state, sample, range),
                     Tab::Temps => temps_tab(ui, &state, sample, range),
@@ -1136,7 +1134,19 @@ fn filesystems_card(ui: &mut Ui, s: &Sample) {
     w::card(ui, |ui| {
         w::section(ui, "Filesystems", "");
         egui::Grid::new("disks").num_columns(5).spacing([24.0, 8.0]).show(ui, |ui| {
-            for d in &s.disks {
+            let mut rows: Vec<&Disk> = s.disks.iter().collect();
+            if let Some((column, descending)) = w::sort_header(ui, "filesystems", &["Mount", "Type", "", "Used", "Size"], &[0, 1]) {
+                rows.sort_by(|a, b| {
+                    let order = match column {
+                        0 => a.mount.cmp(&b.mount),
+                        1 => a.fstype.cmp(&b.fstype),
+                        3 => a.pct().total_cmp(&b.pct()),
+                        _ => a.total.cmp(&b.total),
+                    };
+                    w::directed(order, descending)
+                });
+            }
+            for d in rows {
                 ui.label(&d.mount);
                 ui.label(w::muted(&d.fstype));
                 w::meter(ui, d.pct() / 100.0, 260.0);
@@ -1273,12 +1283,9 @@ fn cores_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
     }
 }
 
-fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String, by_memory: &mut bool) {
+fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String) {
     ui.horizontal(|ui| {
         ui.add(egui::TextEdit::singleline(filter).hint_text("Filter by command, user or PID").desired_width(280.0));
-        ui.label(w::muted("Sort by"));
-        ui.selectable_value(by_memory, false, "CPU");
-        ui.selectable_value(by_memory, true, "Memory");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if s.zombies > 0 {
                 w::status(ui, w::WARNING, &format!("{} zombies", s.zombies));
@@ -1297,17 +1304,25 @@ fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String, by_memory: &mut b
                 || p.pid.to_string() == needle
         })
         .collect();
-    if *by_memory {
-        procs.sort_by(|a, b| b.rss.cmp(&a.rss));
-    } else {
-        procs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.rss.cmp(&a.rss)));
-    }
+    // Busiest first unless a column was clicked.
+    procs.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.rss.cmp(&a.rss)));
     w::card(ui, |ui| {
         egui::Grid::new("procs").num_columns(8).striped(true).spacing([18.0, 7.0]).show(ui, |ui| {
-            for head in ["PID", "User", "CPU", "", "Memory", "RSS", "Running", "Command"] {
-                ui.label(w::muted(head));
+            let heads = ["PID", "User", "CPU", "", "Memory", "RSS", "Running", "Command"];
+            if let Some((column, descending)) = w::sort_header(ui, "procs", &heads, &[1, 7]) {
+                procs.sort_by(|a, b| {
+                    let order = match column {
+                        0 => a.pid.cmp(&b.pid),
+                        1 => a.user.cmp(&b.user),
+                        2 => a.cpu.total_cmp(&b.cpu),
+                        4 => a.mem_pct.total_cmp(&b.mem_pct),
+                        5 => a.rss.cmp(&b.rss),
+                        6 => a.elapsed.cmp(&b.elapsed),
+                        _ => a.cmd.cmp(&b.cmd),
+                    };
+                    w::directed(order, descending)
+                });
             }
-            ui.end_row();
             for p in procs.iter().take(80) {
                 ui.label(RichText::new(p.pid.to_string()).monospace());
                 ui.label(&p.user);
@@ -1387,13 +1402,23 @@ fn network_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) 
         }
         let top = s.net.iter().map(|n| n.rx_bps.max(n.tx_bps)).fold(1.0, f64::max);
         egui::Grid::new("interfaces").num_columns(8).striped(true).spacing([24.0, 8.0]).show(ui, |ui| {
-            for head in ["Interface", "Received", "", "Sent", "", "Total received", "Total sent", "Kind"] {
-                ui.label(w::muted(head));
-            }
-            ui.end_row();
             // Real ports on top, then whatever carried the most.
             let mut rows: Vec<&NetIface> = s.net.iter().collect();
             rows.sort_by(|a, b| b.physical.cmp(&a.physical).then((b.rx_total + b.tx_total).cmp(&(a.rx_total + a.tx_total))));
+            let heads = ["Interface", "Received", "", "Sent", "", "Total received", "Total sent", "Kind"];
+            if let Some((column, descending)) = w::sort_header(ui, "interfaces", &heads, &[0]) {
+                rows.sort_by(|a, b| {
+                    let order = match column {
+                        0 => a.name.cmp(&b.name),
+                        1 => a.rx_bps.total_cmp(&b.rx_bps),
+                        3 => a.tx_bps.total_cmp(&b.tx_bps),
+                        5 => a.rx_total.cmp(&b.rx_total),
+                        6 => a.tx_total.cmp(&b.tx_total),
+                        _ => a.physical.cmp(&b.physical),
+                    };
+                    w::directed(order, descending)
+                });
+            }
             for n in rows {
                 ui.label(RichText::new(&n.name).strong());
                 ui.label(fmt_rate(n.rx_bps));
@@ -1475,11 +1500,20 @@ fn disks_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
         let detailed = s.disk_io.iter().any(|d| d.util.is_some());
         let heads: &[&str] = if detailed { &["Disk", "Read", "Write", "Operations / s", "Busy", ""] } else { &["Disk", "Read", "Write"] };
         egui::Grid::new("disk-io").num_columns(heads.len()).striped(true).spacing([28.0, 8.0]).show(ui, |ui| {
-            for head in heads {
-                ui.label(w::muted(*head));
+            let mut rows: Vec<&DiskIo> = s.disk_io.iter().collect();
+            if let Some((column, descending)) = w::sort_header(ui, "disk-io", heads, &[0]) {
+                rows.sort_by(|a, b| {
+                    let order = match column {
+                        0 => a.name.cmp(&b.name),
+                        1 => a.read_bps.total_cmp(&b.read_bps),
+                        2 => a.write_bps.total_cmp(&b.write_bps),
+                        3 => a.iops.total_cmp(&b.iops),
+                        _ => a.util.unwrap_or(0.0).total_cmp(&b.util.unwrap_or(0.0)),
+                    };
+                    w::directed(order, descending)
+                });
             }
-            ui.end_row();
-            for d in &s.disk_io {
+            for d in rows {
                 ui.label(RichText::new(&d.name).strong());
                 ui.label(fmt_bytes_rate(d.read_bps));
                 ui.label(fmt_bytes_rate(d.write_bps));
@@ -1557,11 +1591,19 @@ fn temps_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
     w::card(ui, |ui| {
         w::section(ui, "All sensors", "");
         egui::Grid::new("sensors").num_columns(5).striped(true).spacing([28.0, 8.0]).show(ui, |ui| {
-            for head in ["Chip", "Reading", "Kind", "Temperature", ""] {
-                ui.label(w::muted(head));
+            let mut rows: Vec<&Sensor> = s.sensors.iter().collect();
+            if let Some((column, descending)) = w::sort_header(ui, "sensors", &["Chip", "Reading", "Kind", "Temperature", ""], &[0, 1, 2]) {
+                rows.sort_by(|a, b| {
+                    let order = match column {
+                        0 => a.chip.cmp(&b.chip),
+                        1 => a.label.cmp(&b.label),
+                        2 => a.kind().label().cmp(b.kind().label()),
+                        _ => a.temp.total_cmp(&b.temp),
+                    };
+                    w::directed(order, descending)
+                });
             }
-            ui.end_row();
-            for x in &s.sensors {
+            for x in rows {
                 let (warm, hot) = x.limits();
                 ui.label(RichText::new(&x.chip).strong());
                 ui.label(if x.label.is_empty() { "–" } else { x.label.as_str() });
@@ -1645,11 +1687,21 @@ fn gpu_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
 
     w::card(ui, |ui| {
         egui::Grid::new("gpus").num_columns(7).striped(true).spacing([28.0, 8.0]).show(ui, |ui| {
-            for head in ["#", "Name", "Load", "", "Memory", "Temperature", "Power"] {
-                ui.label(w::muted(head));
+            let mut rows: Vec<(usize, &Gpu)> = s.gpus.iter().enumerate().collect();
+            if let Some((column, descending)) = w::sort_header(ui, "gpus", &["#", "Name", "Load", "", "Memory", "Temperature", "Power"], &[0, 1]) {
+                rows.sort_by(|(i, a), (j, b)| {
+                    let order = match column {
+                        0 => i.cmp(j),
+                        1 => a.name.cmp(&b.name),
+                        2 => a.util.total_cmp(&b.util),
+                        4 => a.mem_used.cmp(&b.mem_used),
+                        5 => a.temp.unwrap_or(0.0).total_cmp(&b.temp.unwrap_or(0.0)),
+                        _ => a.power.unwrap_or(0.0).total_cmp(&b.power.unwrap_or(0.0)),
+                    };
+                    w::directed(order, descending)
+                });
             }
-            ui.end_row();
-            for (i, g) in s.gpus.iter().enumerate() {
+            for (i, g) in rows {
                 ui.label(i.to_string());
                 ui.label(RichText::new(&g.name).strong());
                 ui.label(format!("{:.0}%", g.util));
@@ -1773,11 +1825,24 @@ fn docker_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64), s
 fn container_table(ui: &mut Ui, rows: &[&Container], s: &Sample) {
     {
         egui::Grid::new("containers").num_columns(9).striped(true).spacing([18.0, 8.0]).show(ui, |ui| {
-            for head in ["State", "Name", "Image", "CPU", "Memory", "", "Net I/O", "PIDs", "Status"] {
-                ui.label(w::muted(head));
+            let mut rows = rows.to_vec();
+            let heads = ["State", "Name", "Image", "CPU", "Memory", "", "Net I/O", "PIDs", "Status"];
+            if let Some((column, descending)) = w::sort_header(ui, "containers", &heads, &[0, 1, 2, 6, 8]) {
+                rows.sort_by(|a, b| {
+                    let order = match column {
+                        0 => container_status(a).1.cmp(container_status(b).1),
+                        1 => a.name.cmp(&b.name),
+                        2 => a.image.cmp(&b.image),
+                        3 => a.cpu.total_cmp(&b.cpu),
+                        4 => a.mem_used.cmp(&b.mem_used),
+                        6 => a.net.cmp(&b.net),
+                        7 => a.pids.cmp(&b.pids),
+                        _ => a.status.cmp(&b.status),
+                    };
+                    w::directed(order, descending)
+                });
             }
-            ui.end_row();
-            for c in rows {
+            for c in &rows {
                 let (color, label) = container_status(c);
                 w::status(ui, color, label);
                 ui.label(RichText::new(&c.name).strong());

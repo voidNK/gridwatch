@@ -4,6 +4,13 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.4.0
+
+- The GPU tab now comes right after the overview, before CPU.
+- **Sortable tables**: click a column title in the process, container, interface, disk, filesystem,
+  sensor and GPU tables to sort by it; a second click reverses, a third returns to the usual order.
+  This replaces the CPU / Memory switch above the process list.
+
 ## 0.3.0
 
 - **This computer** is listed as the first server: read through the Windows API on Windows,

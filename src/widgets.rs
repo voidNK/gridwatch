@@ -57,6 +57,62 @@ pub fn muted(text: impl Into<String>) -> RichText {
     RichText::new(text).color(MUTED)
 }
 
+/// Header row of a grid; a click on a column title sorts the table by it.
+/// Returns the chosen (column, descending), or `None` while the table keeps its own order.
+/// The first click starts with the largest value (with A for the columns listed in `text`),
+/// the second reverses, the third returns to the table's own order.
+pub fn sort_header(ui: &mut Ui, table: &str, heads: &[&str], text: &[usize]) -> Option<(usize, bool)> {
+    let id = egui::Id::unique(("sort", table));
+    let mut chosen: Option<(usize, bool)> = ui.data(|d| d.get_temp(id));
+    for (column, head) in heads.iter().enumerate() {
+        if head.is_empty() {
+            ui.label("");
+            continue;
+        }
+        let first_descending = !text.contains(&column);
+        let title = match chosen {
+            // The trailing blanks leave room for the arrow that is painted below.
+            Some((c, _)) if c == column => RichText::new(format!("{head}    ")).color(TEXT),
+            _ => muted(*head),
+        };
+        let response = ui
+            .add(egui::Label::new(title).sense(Sense::click()))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Click to sort");
+        if let Some((_, descending)) = chosen.filter(|c| c.0 == column) {
+            // Painted, because the built-in fonts have no reliable arrow glyph.
+            let center = egui::pos2(response.rect.right() - 5.0, response.rect.center().y);
+            let tip = if descending { 3.0 } else { -3.0 };
+            let points = vec![
+                egui::pos2(center.x - 4.0, center.y - tip),
+                egui::pos2(center.x + 4.0, center.y - tip),
+                egui::pos2(center.x, center.y + tip),
+            ];
+            ui.painter().add(egui::Shape::convex_polygon(points, TEXT, egui::Stroke::NONE));
+        }
+        if response.clicked() {
+            chosen = match chosen {
+                Some((c, descending)) if c == column && descending == first_descending => Some((column, !descending)),
+                Some((c, _)) if c == column => None,
+                _ => Some((column, first_descending)),
+            };
+            ui.data_mut(|d| match chosen {
+                Some(choice) => {
+                    d.insert_temp(id, choice);
+                }
+                None => d.remove::<(usize, bool)>(id),
+            });
+        }
+    }
+    ui.end_row();
+    chosen
+}
+
+/// Apply the direction chosen in a [`sort_header`].
+pub fn directed(order: std::cmp::Ordering, descending: bool) -> std::cmp::Ordering {
+    if descending { order.reverse() } else { order }
+}
+
 pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
     Frame::new()
         .fill(SURFACE)
