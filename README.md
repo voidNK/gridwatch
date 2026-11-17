@@ -237,6 +237,7 @@ cargo test real_release -- --ignored --nocapture                              # 
 | `src/suggest.rs` | suggestion rules |
 | `src/notify.rs` | alert sound and desktop notifications |
 | `src/tray.rs` | the tray icon |
+| `src/instance.rs` | one running copy: a second start wakes the first |
 | `src/app.rs`, `src/widgets.rs` | the egui user interface |
 | `src/demo.rs` | simulated servers |
 | `packaging/` | the icon, the Inno Setup script for Windows, the app bundle and disk image for macOS |

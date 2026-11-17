@@ -6,6 +6,7 @@ mod app;
 mod collector;
 mod demo;
 mod hardware;
+mod instance;
 #[cfg(windows)]
 mod local_windows;
 mod model;
@@ -106,6 +107,14 @@ fn main() -> eframe::Result {
             return Ok(());
         }
     };
+    // One running copy is enough: starting gridwatch again brings the first one to the front.
+    if !args.demo
+        && args.screenshot_dir.is_none()
+        && let Ok(paths) = store::Paths::resolve()
+        && instance::wake_running(&paths.instance)
+    {
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("gridwatch")

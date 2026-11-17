@@ -8,7 +8,7 @@ use crate::suggest::{self, Severity, Suggestion};
 use crate::tray::{self, Tray};
 use crate::update::{self, Release};
 use crate::widgets::{self as w, ChartOptions, Series};
-use crate::{Args, demo, now_ts, secrets};
+use crate::{Args, demo, instance, now_ts, secrets};
 use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, ScrollArea, Sense, Ui};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -124,6 +124,8 @@ pub struct App {
     hidden: bool,
     /// Quit was chosen, so closing the window really ends the program.
     quitting: bool,
+    /// Set when gridwatch was started a second time: come to the front instead.
+    wake: Arc<AtomicBool>,
     confirm_remove: bool,
     secret_input: String,
     proc_filter: String,
@@ -211,6 +213,7 @@ impl App {
             tray_refreshed: Instant::now(),
             hidden: false,
             quitting: false,
+            wake: Arc::default(),
             confirm_remove: false,
             secret_input: String::new(),
             proc_filter: String::new(),
@@ -244,6 +247,13 @@ impl App {
         for (i, cfg) in app.config.servers.clone().into_iter().enumerate() {
             let server = app.start(cfg, i);
             app.servers.push(server);
+        }
+        if let (Some(paths), true) = (&app.paths, app.screenshots.is_none()) {
+            let (wake, ctx) = (app.wake.clone(), cc.egui_ctx.clone());
+            instance::listen(&paths.instance, move || {
+                wake.store(true, Ordering::SeqCst);
+                ctx.request_repaint();
+            });
         }
         if !app.is_demo() {
             app.apply_builtin();
@@ -548,6 +558,9 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.drive_screenshots(&ctx);
         self.drive_tray(&ctx);
+        if self.wake.swap(false, Ordering::SeqCst) {
+            self.show_window(&ctx, true);
+        }
         if self.last_prune.elapsed() > Duration::from_secs(3600) {
             self.last_prune = Instant::now();
             let _ = self.env.store.prune(self.config.retention_days, now_ts());

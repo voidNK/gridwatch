@@ -131,6 +131,8 @@ pub struct Paths {
     pub config: PathBuf,
     pub database: PathBuf,
     pub known_hosts: PathBuf,
+    /// Where the running copy notes the port it listens on, see `instance.rs`.
+    pub instance: PathBuf,
 }
 
 impl Paths {
@@ -143,6 +145,7 @@ impl Paths {
             config: dirs.config_dir().join("config.json"),
             database: dirs.data_dir().join("history.sqlite"),
             known_hosts: dirs.data_dir().join("known_hosts"),
+            instance: dirs.data_dir().join("instance.port"),
         })
     }
 }
