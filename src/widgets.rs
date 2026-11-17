@@ -227,6 +227,45 @@ pub fn tile(ui: &mut Ui, label: &str, value: &str, sub: &str, state: Level) {
     });
 }
 
+/// Small pictures drawn with a few shapes, so no image files have to be shipped.
+#[derive(Clone, Copy)]
+pub enum Icon {
+    /// A cup with a heart, for Ko-fi.
+    Cup,
+    /// A wallet, for PayPal.
+    Wallet,
+}
+
+/// A button with a picture in front of its label.
+pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> egui::Response {
+    // The blanks reserve the place where the picture is painted.
+    let response = ui.button(format!("      {label}"));
+    let c = egui::pos2(response.rect.left() + 15.0, response.rect.center().y);
+    let painter = ui.painter();
+    match icon {
+        Icon::Cup => {
+            let body = egui::Rect::from_min_max(egui::pos2(c.x - 6.0, c.y - 4.0), egui::pos2(c.x + 3.0, c.y + 5.0));
+            painter.circle_stroke(egui::pos2(c.x + 4.0, c.y - 0.5), 2.6, egui::Stroke::new(1.5, TEXT));
+            let corners = CornerRadius {
+                nw: 1,
+                ne: 1,
+                sw: 4,
+                se: 4,
+            };
+            painter.rect_filled(body, corners, TEXT);
+            painter.circle_filled(egui::pos2(c.x - 1.5, c.y), 2.0, CRITICAL);
+        }
+        Icon::Wallet => {
+            let body = egui::Rect::from_center_size(c, Vec2::new(14.0, 10.0));
+            painter.rect_filled(body, CornerRadius::same(2), SERIES[0]);
+            let flap = egui::Rect::from_min_max(egui::pos2(c.x + 1.0, c.y - 2.0), egui::pos2(c.x + 7.0, c.y + 2.0));
+            painter.rect_filled(flap, CornerRadius::same(1), TEXT);
+            painter.circle_filled(egui::pos2(c.x + 3.5, c.y), 1.0, SERIES[0]);
+        }
+    }
+    response
+}
+
 /// A coloured state with its label, e.g. red and "critical".
 pub type Level<'a> = Option<(Color32, &'a str)>;
 /// Label, value, subtitle and state of one tile.

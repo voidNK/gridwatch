@@ -565,6 +565,15 @@ impl App {
                 if ui.button("Settings").clicked() {
                     self.settings_open = !self.settings_open;
                 }
+                for (label, url, icon) in [
+                    ("PayPal", DONATE_PAYPAL, w::Icon::Wallet),
+                    ("Ko-fi", DONATE_KOFI, w::Icon::Cup),
+                ] {
+                    let hover = format!("gridwatch is free. If it helps you, a donation is welcome.\n{url}");
+                    if w::icon_button(ui, icon, label).on_hover_text(hover).clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    }
+                }
                 let on = self.config.notifications.enabled;
                 let bell = ui
                     .selectable_label(on, if on { "🔔 Alerts on" } else { "🔕 Alerts off" })
@@ -1103,20 +1112,6 @@ Click to switch on or off.",
                         ui.label(w::muted("Demo mode: settings are not saved."));
                     }
                     ui.add_space(4.0);
-                    ui.add_space(6.0);
-                    w::section(
-                        ui,
-                        "Support gridwatch",
-                        "it is free; a donation is welcome if it helps you",
-                    );
-                    ui.horizontal(|ui| {
-                        if ui.button("Support on Ko-fi").on_hover_text(DONATE_KOFI).clicked() {
-                            ui.ctx().open_url(egui::OpenUrl::new_tab(DONATE_KOFI));
-                        }
-                        if ui.button("Donate with PayPal").on_hover_text(DONATE_PAYPAL).clicked() {
-                            ui.ctx().open_url(egui::OpenUrl::new_tab(DONATE_PAYPAL));
-                        }
-                    });
                     close = ui.button("Close").clicked();
                 });
             });
