@@ -26,6 +26,9 @@ pub struct Config {
     /// Keep passwords and passphrases in the keychain of the operating system.
     #[serde(default = "yes")]
     pub remember_secrets: bool,
+    /// Ask GitHub at start whether a newer version exists.
+    #[serde(default = "yes")]
+    pub check_updates: bool,
 }
 
 fn yes() -> bool {
@@ -82,6 +85,7 @@ impl Default for Config {
             show_local: true,
             show_wsl: false,
             remember_secrets: true,
+            check_updates: true,
         }
     }
 }

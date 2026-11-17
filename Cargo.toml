@@ -1,6 +1,6 @@
 [package]
 name = "gridwatch"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2024"
 license-file = "LICENSE"
 description = "Desktop dashboard that watches Linux and macOS machines over SSH"
@@ -12,15 +12,21 @@ directories = "6.0.0"
 eframe = "0.37.0"
 egui_extras = { version = "0.37", default-features = false }
 egui_plot = "0.38.0"
+flate2 = "1.1.11"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 keyring = { version = "4.2.0", features = ["apple-native-keyring-store"] }
 notify-rust = "4.19.0"
 rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 russh = { version = "0.65.2", default-features = false, features = ["ring", "flate2", "rsa"] }
+self-replace = "1.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.1"
+tar = "0.4.46"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+ureq = "3.5.2"
+zip = { version = "9.6.1", default-features = false, features = ["deflate"] }
 
 [target."cfg(windows)".dependencies]
 sysinfo = "0.40.4"

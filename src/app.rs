@@ -5,6 +5,7 @@ use crate::model::*;
 use crate::notify::Notifier;
 use crate::store::{Config, Notifications, Paths, Store};
 use crate::suggest::{self, Severity, Suggestion};
+use crate::update::{self, Release};
 use crate::widgets::{self as w, ChartOptions, Series};
 use crate::{Args, demo, now_ts, secrets};
 use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, ScrollArea, Sense, Ui};
@@ -77,6 +78,21 @@ struct Screenshots {
     done: Arc<AtomicBool>,
 }
 
+/// Where the search for a newer version stands.
+#[derive(Clone, Default, PartialEq)]
+enum UpdateState {
+    #[default]
+    Unknown,
+    Checking,
+    UpToDate,
+    CheckFailed(String),
+    Available(Release),
+    Installing(Release),
+    InstallFailed(Release, String),
+    /// The new version is in place and runs from the next start.
+    Installed(String),
+}
+
 pub struct App {
     rt: tokio::runtime::Runtime,
     env: Arc<Env>,
@@ -93,6 +109,9 @@ pub struct App {
     /// Index of the server card being dragged to a new place in the list.
     dragging: Option<usize>,
     settings_open: bool,
+    /// Written by the background task that asks GitHub or installs.
+    update: Arc<Mutex<UpdateState>>,
+    update_open: bool,
     confirm_remove: bool,
     secret_input: String,
     proc_filter: String,
@@ -171,6 +190,8 @@ impl App {
             dialog: None,
             dragging: None,
             settings_open: false,
+            update: Arc::default(),
+            update_open: false,
             confirm_remove: false,
             secret_input: String::new(),
             proc_filter: String::new(),
@@ -207,6 +228,9 @@ impl App {
         }
         if !app.is_demo() {
             app.apply_builtin();
+            if app.config.check_updates && app.screenshots.is_none() {
+                app.check_for_update();
+            }
         }
         Ok(app)
     }
@@ -525,6 +549,7 @@ impl eframe::App for App {
 
         self.dialog_window(&ctx);
         self.settings_window(&ctx);
+        self.update_window(&ctx);
         self.remove_window(&ctx);
     }
 }
@@ -564,6 +589,20 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Settings").clicked() {
                     self.settings_open = !self.settings_open;
+                }
+                let update = self.update.lock().unwrap().clone();
+                let label = match &update {
+                    UpdateState::Available(release) => Some(format!("Update to {}", release.version)),
+                    UpdateState::Installing(_) => Some("Updating…".to_string()),
+                    UpdateState::InstallFailed(..) => Some("Update failed".to_string()),
+                    UpdateState::Installed(_) => Some("Restart to update".to_string()),
+                    _ => None,
+                };
+                if let Some(label) = label {
+                    let button = egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(w::SERIES[0]);
+                    if ui.add(button).clicked() {
+                        self.update_open = true;
+                    }
                 }
                 for (label, url, icon) in [
                     ("PayPal", DONATE_PAYPAL, w::Icon::Wallet),
@@ -972,6 +1011,7 @@ Click to switch on or off.",
         let mut open = true;
         let mut close = false;
         let mut test = None;
+        let mut check_now = false;
         egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
@@ -1108,6 +1148,37 @@ Click to switch on or off.",
                                 "GNOME Keyring or KWallet"
                             }));
                         });
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.config.check_updates, "Look for a new version at start");
+                            let state = self.update.lock().unwrap().clone();
+                            if ui
+                                .add_enabled(state != UpdateState::Checking, egui::Button::new("Check now"))
+                                .clicked()
+                            {
+                                check_now = true;
+                            }
+                            match state {
+                                UpdateState::Checking => {
+                                    ui.spinner();
+                                }
+                                UpdateState::UpToDate => {
+                                    ui.label(w::muted(concat!(
+                                        "you have the newest version, ",
+                                        env!("CARGO_PKG_VERSION")
+                                    )));
+                                }
+                                UpdateState::CheckFailed(message) => {
+                                    ui.label(w::muted(message));
+                                }
+                                UpdateState::Available(release) => {
+                                    ui.label(format!(
+                                        "{} is available, see the button in the top bar",
+                                        release.version
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        });
                     } else {
                         ui.label(w::muted("Demo mode: settings are not saved."));
                     }
@@ -1137,11 +1208,132 @@ Click to switch on or off.",
         if self.config.show_local != before.show_local || self.config.show_wsl != before.show_wsl {
             self.apply_builtin();
         }
+        if check_now {
+            self.check_for_update();
+        }
         if let Some(severity) = test {
             self.env.notifier.test(severity);
         }
         if !open || close {
             self.settings_open = false;
+        }
+    }
+
+    /// Ask GitHub in the background whether a newer version exists.
+    fn check_for_update(&self) {
+        let (state, repaint) = (self.update.clone(), self.env.repaint.clone());
+        *state.lock().unwrap() = UpdateState::Checking;
+        self.rt.spawn_blocking(move || {
+            let result = match update::check() {
+                Ok(Some(release)) => UpdateState::Available(release),
+                Ok(None) => UpdateState::UpToDate,
+                Err(e) => UpdateState::CheckFailed(format!("{e:#}")),
+            };
+            *state.lock().unwrap() = result;
+            repaint.request_repaint();
+        });
+    }
+
+    fn install_update(&self, release: Release) {
+        let (state, repaint) = (self.update.clone(), self.env.repaint.clone());
+        *state.lock().unwrap() = UpdateState::Installing(release.clone());
+        self.rt.spawn_blocking(move || {
+            let result = match update::install(&release) {
+                Ok(()) => UpdateState::Installed(release.version.clone()),
+                Err(e) => UpdateState::InstallFailed(release, format!("{e:#}")),
+            };
+            *state.lock().unwrap() = result;
+            repaint.request_repaint();
+        });
+    }
+
+    /// The window behind the update button: what is new, and the button that installs it.
+    fn update_window(&mut self, ctx: &egui::Context) {
+        if !self.update_open {
+            return;
+        }
+        let state = self.update.lock().unwrap().clone();
+        let mut open = true;
+        let mut install = None;
+        let mut restart = false;
+        let mut close = false;
+        egui::Window::new("Update")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .default_size([520.0, 360.0])
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                let notes = |ui: &mut Ui, release: &Release| {
+                    ui.label(
+                        RichText::new(format!("gridwatch {} is available", release.version))
+                            .size(16.0)
+                            .strong(),
+                    );
+                    ui.label(w::muted(concat!("You have ", env!("CARGO_PKG_VERSION"), ".")));
+                    if !release.notes.is_empty() {
+                        ScrollArea::vertical()
+                            .max_height(220.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(&release.notes).color(w::TEXT_SECONDARY));
+                            });
+                    }
+                };
+                match &state {
+                    UpdateState::Available(release) => {
+                        notes(ui, release);
+                        ui.horizontal(|ui| {
+                            if ui.button("Download and install").clicked() {
+                                install = Some(release.clone());
+                            }
+                            close = ui.button("Later").clicked();
+                        });
+                        ui.label(w::muted(
+                            "Downloaded from the gridwatch releases on GitHub and checked against its checksum.",
+                        ));
+                    }
+                    UpdateState::Installing(release) => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(format!("Downloading and installing {}…", release.version));
+                        });
+                    }
+                    UpdateState::InstallFailed(release, message) => {
+                        w::status(ui, w::CRITICAL, "The update could not be installed");
+                        ui.label(RichText::new(message).color(w::TEXT_SECONDARY));
+                        ui.label(w::muted("The version you have keeps running."));
+                        ui.horizontal(|ui| {
+                            if ui.button("Try again").clicked() {
+                                install = Some(release.clone());
+                            }
+                            close = ui.button("Close").clicked();
+                        });
+                    }
+                    UpdateState::Installed(version) => {
+                        w::status(ui, w::GOOD, &format!("gridwatch {version} is installed"));
+                        ui.label("It starts with the next launch.");
+                        ui.horizontal(|ui| {
+                            restart = ui.button("Restart now").clicked();
+                            close = ui.button("Later").clicked();
+                        });
+                    }
+                    _ => close = true,
+                }
+            });
+        if let Some(release) = install {
+            self.install_update(release);
+        }
+        if restart {
+            match update::restart() {
+                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => *self.update.lock().unwrap() = UpdateState::CheckFailed(format!("{e:#}")),
+            }
+        }
+        if !open || close {
+            self.update_open = false;
         }
     }
 

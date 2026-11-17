@@ -80,6 +80,14 @@ has no installer that could register its own name. On macOS it appears under Fin
 Every version is built for Windows, Linux and macOS by GitHub Actions and published on the
 **Releases** page of the repository. Unpack the archive and start `gridwatch`.
 
+## Updates
+
+gridwatch asks GitHub at start whether a newer version exists. If so, an **Update to ...** button
+appears in the top bar; it shows what is new and, after a click on *Download and install*, fetches
+the release, compares it with the checksum GitHub publishes, and replaces the program. Nothing is
+installed without that click. The check can be switched off in the settings, and
+`gridwatch --update` does the same from a terminal.
+
 ## Build and run
 
 Requires a recent Rust toolchain (edition 2024) and a C compiler (for the bundled SQLite and `ring`).
@@ -102,6 +110,7 @@ cargo run --release -- --demo
 | `--demo` | simulated servers; nothing is read from or written to disk |
 | `--screenshot <DIR>` | save a PNG of every tab into `DIR`, then exit |
 | `--delay <SECONDS>` | wait for data before the first screenshot |
+| `--update` | install the newest version, if there is one, and exit |
 | `--version` | print the version |
 
 ## Adding a server
@@ -187,6 +196,7 @@ cargo run -- --demo --screenshot docs/screenshots --delay 2   # regenerate the s
 GRIDWATCH_TEST_HOST=user@host cargo test live_host -- --ignored --nocapture   # poll a machine over ssh
 cargo test local_shell -- --ignored --nocapture                               # poll this computer (WSL on Windows)
 cargo test keychain -- --ignored                                              # write to and read from the keychain
+cargo test real_release -- --ignored --nocapture                              # download the latest release and run it
 ```
 
 | File | Purpose |
@@ -197,6 +207,7 @@ cargo test keychain -- --ignored                                              # 
 | `src/local_windows.rs` | this computer on Windows, through the Windows API |
 | `src/store.rs` | SQLite history and the config file |
 | `src/secrets.rs` | passwords in the system keychain |
+| `src/update.rs` | looking for and installing a newer release |
 | `src/suggest.rs` | suggestion rules |
 | `src/notify.rs` | alert sound and desktop notifications |
 | `src/app.rs`, `src/widgets.rs` | the egui user interface |

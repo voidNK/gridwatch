@@ -4,6 +4,14 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.6.0
+
+- **Updates**: gridwatch asks GitHub at start whether a newer version exists and shows an
+  "Update to ..." button in the top bar. A click shows what is new; "Download and install" fetches
+  the release, compares it with its checksum and replaces the program, "Restart now" starts the new
+  version. Nothing is installed without a click. The check can be switched off in the settings,
+  and `gridwatch --update` does the same from a terminal.
+
 ## 0.5.3
 
 - The Ko-fi and PayPal buttons moved from the settings to the top bar, next to Settings, each with an icon.

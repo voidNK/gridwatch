@@ -14,6 +14,7 @@ mod secrets;
 mod ssh;
 mod store;
 mod suggest;
+mod update;
 mod widgets;
 
 use eframe::egui;
@@ -41,6 +42,7 @@ USAGE: gridwatch [OPTIONS]
   --demo               show simulated servers (no SSH connection, nothing is saved)
   --screenshot <DIR>   save a PNG of every tab into DIR, then exit
   --delay <SECONDS>    wait this long for data before the first screenshot
+  --update             install the newest version, if there is one, and exit
   -V, --version        print the version
   -h, --help           print this help";
 
@@ -59,6 +61,16 @@ fn parse_args() -> Result<Args, String> {
                     .next()
                     .and_then(|v| v.parse().ok())
                     .ok_or("--delay needs a number of seconds")?;
+            }
+            "--update" => {
+                return Err(match update::check() {
+                    Ok(Some(release)) => match update::install(&release) {
+                        Ok(()) => format!("gridwatch {} is installed.", release.version),
+                        Err(e) => format!("Update to {} failed: {e:#}", release.version),
+                    },
+                    Ok(None) => concat!("gridwatch ", env!("CARGO_PKG_VERSION"), " is the newest version.").to_string(),
+                    Err(e) => format!("Cannot look for updates: {e:#}"),
+                });
             }
             "-V" | "--version" => return Err(concat!("gridwatch ", env!("CARGO_PKG_VERSION")).to_string()),
             "-h" | "--help" => return Err(HELP.to_string()),
