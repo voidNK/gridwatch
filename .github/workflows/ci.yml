@@ -46,3 +46,31 @@ jobs:
 
       - name: Build
         run: cargo build --release --locked
+
+      # The installers are built here as well, so a broken packaging script shows up
+      # before a release is tagged. They can be downloaded from the run for a try-out.
+      - name: Installer (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          sh packaging/macos/package.sh target/release/gridwatch "$version" macos-arm64 dist
+
+      - name: Installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$version" "/DProgram=$((Resolve-Path target\release\gridwatch.exe).Path)" packaging\windows\gridwatch.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os != 'Linux'
+        with:
+          name: installer-${{ runner.os }}
+          path: |
+            dist/*.dmg
+            dist/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7

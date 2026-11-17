@@ -81,6 +81,22 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
+/// The icon of the window and the taskbar, from the PNG that is also packaged.
+fn icon() -> egui::IconData {
+    match image::load_from_memory(include_bytes!("../packaging/icon.png")) {
+        Ok(picture) => {
+            let picture = picture.to_rgba8();
+            let (width, height) = picture.dimensions();
+            egui::IconData {
+                rgba: picture.into_raw(),
+                width,
+                height,
+            }
+        }
+        Err(_) => egui::IconData::default(),
+    }
+}
+
 fn main() -> eframe::Result {
     let args = match parse_args() {
         Ok(args) => args,
@@ -93,7 +109,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("gridwatch")
             .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 600.0]),
+            .with_min_inner_size([960.0, 600.0])
+            .with_icon(icon()),
         ..Default::default()
     };
     eframe::run_native(

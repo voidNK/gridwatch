@@ -60,38 +60,40 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package
-        shell: bash
+      # Every platform gets an archive the built-in updater reads; Windows and macOS
+      # also get an installer for people.
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         run: |
           name="gridwatch-$GITHUB_REF_NAME-${{ matrix.name }}"
-          mkdir "$name"
-          cp README.md CHANGELOG.md LICENSE "$name/"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/gridwatch.exe" "$name/"
-            7z a "$name.zip" "$name"
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            # An application bundle: started by double click, it opens no Terminal window.
-            app="$name/gridwatch.app"
-            mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-            cp "target/${{ matrix.target }}/release/gridwatch" "$app/Contents/MacOS/"
-            sed "s/@VERSION@/${GITHUB_REF_NAME#v}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
-            codesign --force --deep --sign - "$app"
-            codesign --verify --deep --strict "$app"
-            # The bare program as well: versions up to 0.8.1 look for it there when they update,
-            # and it is handy in a terminal.
-            cp "target/${{ matrix.target }}/release/gridwatch" "$name/"
-            tar -czf "$name.tar.gz" "$name"
-          else
-            cp "target/${{ matrix.target }}/release/gridwatch" "$name/"
-            tar -czf "$name.tar.gz" "$name"
-          fi
+          mkdir -p dist "$name"
+          cp README.md CHANGELOG.md LICENSE "target/${{ matrix.target }}/release/gridwatch" "$name/"
+          tar -czf "dist/$name.tar.gz" "$name"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          sh packaging/macos/package.sh "target/${{ matrix.target }}/release/gridwatch" "${GITHUB_REF_NAME#v}" "${{ matrix.name }}" dist
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $program = "target\${{ matrix.target }}\release\gridwatch.exe"
+          $name = "gridwatch-$env:GITHUB_REF_NAME-${{ matrix.name }}"
+          New-Item -ItemType Directory -Force dist, $name | Out-Null
+          Copy-Item README.md, CHANGELOG.md, LICENSE, $program $name
+          Compress-Archive -Path $name -DestinationPath "dist\$name.zip"
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$version" "/DProgram=$((Resolve-Path $program).Path)" packaging\windows\gridwatch.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: |
-            gridwatch-*.zip
-            gridwatch-*.tar.gz
+          path: dist/*
           if-no-files-found: error
 
   publish:

@@ -83,13 +83,22 @@ has no installer that could register its own name. On macOS it appears under Fin
 
 ## Download
 
-Every version is built for Windows, Linux and macOS by GitHub Actions and published on the
-**Releases** page of the repository. Unpack the archive and start `gridwatch`.
+Every version is built by GitHub Actions and published on the **Releases** page of the repository.
 
-On macOS the archive contains `gridwatch.app`; move it to Applications. The bare `gridwatch`
-program next to it is the same thing for use in a terminal. The app is not notarised
-by Apple, so the first start needs a right click and *Open* (or, if macOS calls it damaged,
-`xattr -dr com.apple.quarantine gridwatch.app` in a terminal).
+| System | Download | Then |
+| --- | --- | --- |
+| Windows | `gridwatch-v...-windows-x86_64-setup.exe` | run it; gridwatch is installed for your user, no administrator rights needed |
+| macOS, Apple Silicon | `gridwatch-v...-macos-arm64.dmg` | open it and drag gridwatch to Applications |
+| macOS, Intel | `gridwatch-v...-macos-x86_64.dmg` | the same |
+| Linux | `gridwatch-v...-linux-x86_64.tar.gz` | unpack and start `gridwatch` |
+
+The `.zip` and `.tar.gz` archives next to the installers are what the built-in updater downloads;
+they also work as a portable version without installation.
+
+Neither installer is signed with a paid developer certificate. Windows SmartScreen may ask for
+confirmation (*More info*, *Run anyway*). On macOS the first start needs a right click and *Open*
+(or, if macOS calls the app damaged, `xattr -dr com.apple.quarantine /Applications/gridwatch.app`
+in a terminal).
 
 ## Updates
 
@@ -226,3 +235,4 @@ cargo test real_release -- --ignored --nocapture                              # 
 | `src/notify.rs` | alert sound and desktop notifications |
 | `src/app.rs`, `src/widgets.rs` | the egui user interface |
 | `src/demo.rs` | simulated servers |
+| `packaging/` | the icon, the Inno Setup script for Windows, the app bundle and disk image for macOS |

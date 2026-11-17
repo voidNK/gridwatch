@@ -4,6 +4,13 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.8.4
+
+- **Installers**: a setup program for Windows (`...-setup.exe`, installs for the current user, with
+  Start menu entry and uninstaller) and a disk image for macOS (`.dmg`, drag the app to Applications).
+- gridwatch has an icon: in the window, the taskbar, the Windows program file and the macOS app.
+- The macOS archive holds only the app again; the bare program was in 0.8.3 for the update from 0.8.1.
+
 ## 0.8.3
 
 - Fixed: on macOS the update from 0.8.1 or older failed with "the archive does not contain the
