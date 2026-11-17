@@ -213,7 +213,7 @@ pub fn analyze(state: &ServerState) -> Vec<Suggestion> {
             Info,
             "Docker is installed but not accessible".into(),
             msg.clone(),
-            "Add the SSH user to the docker group: `sudo usermod -aG docker $USER`, then log in again.",
+            "Start the docker daemon if it is not running. On Linux, add the SSH user to the docker group: `sudo usermod -aG docker $USER`, then log in again.",
         ),
         DockerState::Ok(list) => {
             // One finding for all failed containers: old leftovers would otherwise bury everything else.

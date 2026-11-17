@@ -218,6 +218,7 @@ pub fn generate(profile: usize, ts: i64) -> (Sample, DockerState) {
             os: "Ubuntu 24.04.3 LTS".into(),
             cpu_model: "AMD EPYC 7543P 32-Core Processor".into(),
             reboot_required: profile == 2,
+            no_per_core: false,
         },
     };
 

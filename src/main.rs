@@ -1,4 +1,4 @@
-//! gridwatch - a desktop dashboard that watches Linux servers over SSH.
+//! gridwatch - a desktop dashboard that watches Linux and macOS machines over SSH.
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -6,6 +6,7 @@ mod app;
 mod collector;
 mod demo;
 mod model;
+mod notify;
 mod parse;
 mod ssh;
 mod store;
@@ -30,7 +31,7 @@ pub struct Args {
     pub screenshot_delay: f32,
 }
 
-const HELP: &str = "gridwatch - monitor Linux servers over SSH
+const HELP: &str = "gridwatch - monitor Linux and macOS machines over SSH
 
 USAGE: gridwatch [OPTIONS]
 

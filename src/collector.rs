@@ -1,6 +1,7 @@
 //! Background tasks: one per server, polling over SSH (or generating demo data).
 
 use crate::model::*;
+use crate::notify::Notifier;
 use crate::parse::{self, RawSystem};
 use crate::ssh::{ConnectError, Session};
 use crate::store::Store;
@@ -21,6 +22,7 @@ pub struct Env {
     pub interval: AtomicU64,
     /// How much history the UI currently shows, in seconds.
     pub keep_secs: AtomicI64,
+    pub notifier: Notifier,
 }
 
 impl Env {
@@ -38,6 +40,11 @@ impl Env {
         state.push(sample, docker, self.keep_secs.load(Ordering::Relaxed));
         drop(state);
         self.repaint.request_repaint();
+    }
+
+    /// Tell the user if this server has new trouble.
+    fn alert(&self, cfg: &ServerConfig, shared: &Shared) {
+        self.notifier.check(&cfg.id, &cfg.name, &shared.lock().unwrap());
     }
 }
 
@@ -65,6 +72,7 @@ pub fn spawn(
                 }
                 Err(ConnectError::Failed(msg)) => {
                     set_conn(&shared, &env, ConnState::Error(msg));
+                    env.alert(&cfg, &shared);
                     tokio::time::sleep(Duration::from_secs(10)).await;
                     continue;
                 }
@@ -72,13 +80,14 @@ pub fn spawn(
             let err = poll_loop(&session, &cfg, &shared, &env).await.unwrap_err();
             session.close().await;
             set_conn(&shared, &env, ConnState::Error(format!("{err:#}")));
+            env.alert(&cfg, &shared);
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     })
 }
 
 async fn poll_system(session: &Session) -> Result<(RawSystem, Instant)> {
-    let out = session.exec(&parse::wrap(parse::SYSTEM_SCRIPT), Duration::from_secs(20)).await?;
+    let out = session.exec(&parse::system_command(), Duration::from_secs(20)).await?;
     Ok((parse::parse_system(&out)?, Instant::now()))
 }
 
@@ -101,6 +110,7 @@ async fn poll_loop(session: &Session, cfg: &ServerConfig, shared: &Shared, env: 
         let dt = at.duration_since(prev_at).as_secs_f64();
         let sample = parse::build_sample(&prev, &raw, dt, now_ts());
         env.publish(&cfg.id, shared, sample, docker);
+        env.alert(cfg, shared);
         (prev, prev_at) = (raw, at);
         tokio::time::sleep(env.interval().saturating_sub(started.elapsed())).await;
     }
@@ -126,6 +136,7 @@ pub fn spawn_demo(
         loop {
             let (sample, docker) = demo::generate(profile, now_ts());
             env.publish(&cfg.id, &shared, sample, docker);
+            env.alert(&cfg, &shared);
             tokio::time::sleep(env.interval()).await;
         }
     })

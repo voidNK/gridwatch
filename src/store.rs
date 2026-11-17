@@ -15,6 +15,40 @@ pub struct Config {
     pub interval_secs: u64,
     #[serde(default = "default_retention")]
     pub retention_days: u32,
+    #[serde(default)]
+    pub notifications: Notifications,
+}
+
+/// How the user wants to hear about trouble.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Notifications {
+    /// Master switch, the bell button in the top bar.
+    pub enabled: bool,
+    pub sound: bool,
+    pub desktop: bool,
+    /// Stay quiet for warnings.
+    pub critical_only: bool,
+    /// Alert when a server cannot be reached.
+    pub offline: bool,
+    /// 0.0 to 1.0
+    pub volume: f32,
+    /// Alert again while problems stay open; 0 = only once.
+    pub repeat_minutes: u32,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sound: true,
+            desktop: true,
+            critical_only: false,
+            offline: true,
+            volume: 0.7,
+            repeat_minutes: 0,
+        }
+    }
 }
 
 fn default_interval() -> u64 {
@@ -31,6 +65,7 @@ impl Default for Config {
             servers: Vec::new(),
             interval_secs: default_interval(),
             retention_days: default_retention(),
+            notifications: Notifications::default(),
         }
     }
 }

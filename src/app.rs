@@ -2,7 +2,8 @@
 
 use crate::collector::{self, Env};
 use crate::model::*;
-use crate::store::{Config, Paths, Store};
+use crate::notify::Notifier;
+use crate::store::{Config, Notifications, Paths, Store};
 use crate::suggest::{self, Severity, Suggestion};
 use crate::widgets::{self as w, ChartOptions, Series};
 use crate::{Args, demo, now_ts};
@@ -21,7 +22,12 @@ const RANGES: [(&str, i64); 6] = [
     ("24 h", 86400),
     ("7 d", 604800),
 ];
+/// The screenshot that is taken with the settings window open.
+const SETTINGS_SHOT: &str = "settings.png";
 const INTERVALS: [u64; 5] = [2, 5, 10, 30, 60];
+const RETENTION_DAYS: [u32; 5] = [1, 7, 14, 30, 90];
+/// Minutes between reminders about problems that stay open; 0 = never.
+const REPEAT_MINUTES: [u32; 5] = [0, 5, 15, 30, 60];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Tab {
@@ -78,6 +84,7 @@ pub struct App {
     tab: Tab,
     range: usize,
     dialog: Option<Dialog>,
+    settings_open: bool,
     confirm_remove: bool,
     secret_input: String,
     proc_filter: String,
@@ -109,6 +116,11 @@ impl App {
             repaint: cc.egui_ctx.clone(),
             interval: AtomicU64::new(config.interval_secs),
             keep_secs: AtomicI64::new(RANGES[range].1),
+            // Taking screenshots must not ring or pop up anything.
+            notifier: Notifier::new(Notifications {
+                enabled: config.notifications.enabled && args.screenshot_dir.is_none(),
+                ..config.notifications.clone()
+            }),
         });
         let _ = env.store.prune(config.retention_days, now_ts());
 
@@ -121,6 +133,7 @@ impl App {
                 (0, Tab::Processes, "processes.png"),
                 (0, Tab::Docker, "docker.png"),
                 (if args.demo { 2 } else { 0 }, Tab::Suggestions, "suggestions.png"),
+                (0, Tab::Overview, SETTINGS_SHOT),
             ],
             index: 0,
             frames: 0,
@@ -140,6 +153,7 @@ impl App {
             tab: Tab::Overview,
             range,
             dialog: None,
+            settings_open: false,
             confirm_remove: false,
             secret_input: String::new(),
             proc_filter: String::new(),
@@ -216,6 +230,7 @@ impl App {
         server.task.abort();
         let _ = self.env.store.delete_server(&server.cfg.id);
         self.secrets.remove(&server.cfg.id);
+        self.env.notifier.forget(&server.cfg.id);
         self.selected = self.selected.min(self.servers.len().saturating_sub(1));
         self.save_config();
     }
@@ -312,6 +327,7 @@ impl App {
         let (server, tab, file) = shots.shots[shots.index];
         self.selected = server.min(self.servers.len().saturating_sub(1));
         self.tab = tab;
+        self.settings_open = file == SETTINGS_SHOT;
         shots.frames += 1;
         if !shots.requested {
             if shots.frames > 20 && shots.since.elapsed() >= shots.delay {
@@ -367,6 +383,7 @@ impl eframe::App for App {
             .show(ui, |ui| self.central(ui));
 
         self.dialog_window(&ctx);
+        self.settings_window(&ctx);
         self.remove_window(&ctx);
     }
 }
@@ -404,6 +421,18 @@ impl App {
                 self.save_config();
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Settings").clicked() {
+                    self.settings_open = !self.settings_open;
+                }
+                let on = self.config.notifications.enabled;
+                let bell = ui
+                    .selectable_label(on, if on { "🔔 Alerts on" } else { "🔕 Alerts off" })
+                    .on_hover_text("Sound and desktop notification when a server gets into trouble.
+Click to switch on or off.");
+                if bell.clicked() {
+                    self.config.notifications.enabled = !on;
+                    self.apply_notifications();
+                }
                 if !self.is_demo() && ui.button("+ Add server").clicked() {
                     self.open_dialog(None);
                 }
@@ -472,7 +501,7 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.add_space(120.0);
                 ui.label(RichText::new("No servers yet").size(22.0).strong());
-                ui.label(w::muted("Add a Linux machine you can reach over SSH. Nothing needs to be installed on it."));
+                ui.label(w::muted("Add a Linux or macOS machine you can reach over SSH. Nothing needs to be installed on it."));
                 ui.add_space(8.0);
                 if ui.button("+ Add server").clicked() {
                     self.open_dialog(None);
@@ -641,6 +670,138 @@ impl App {
             self.dialog = None;
         } else if submit {
             self.submit_dialog();
+        }
+    }
+
+    /// Hand the notification settings to the collectors and save them.
+    fn apply_notifications(&mut self) {
+        self.env.notifier.set(Notifications {
+            enabled: self.config.notifications.enabled && self.screenshots.is_none(),
+            ..self.config.notifications.clone()
+        });
+        self.save_config();
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+        let before = self.config.clone();
+        let mut open = true;
+        let mut close = false;
+        let mut test = None;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                let n = &mut self.config.notifications;
+                w::section(ui, "Notifications", "when a server gets into trouble");
+                ui.checkbox(&mut n.enabled, "Alerts enabled").on_hover_text("Same switch as the bell in the top bar.");
+                ui.add_enabled_ui(n.enabled, |ui| {
+                    egui::Grid::new("notify-form").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                        ui.checkbox(&mut n.sound, "Play a sound");
+                        ui.add_enabled_ui(n.sound, |ui| {
+                            ui.horizontal(|ui| {
+                                let mut pct = n.volume * 100.0;
+                                ui.add(egui::Slider::new(&mut pct, 5.0..=100.0).fixed_decimals(0).suffix("%").text("volume"));
+                                n.volume = pct / 100.0;
+                            });
+                        });
+                        ui.end_row();
+                        ui.checkbox(&mut n.desktop, "Show a desktop notification");
+                        ui.label(w::muted("Windows toast, macOS Notification Center, Linux desktop"));
+                        ui.end_row();
+                        ui.label("Alert on");
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut n.critical_only, false, "Warnings and critical");
+                            ui.selectable_value(&mut n.critical_only, true, "Critical only");
+                        });
+                        ui.end_row();
+                        ui.checkbox(&mut n.offline, "Server unreachable");
+                        ui.label(w::muted("alert when the SSH connection is lost or fails"));
+                        ui.end_row();
+                        ui.label("Remind me");
+                        let text = |m: u32| if m == 0 { "never".to_string() } else { format!("every {m} min") };
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("repeat").width(110.0).selected_text(text(n.repeat_minutes)).show_ui(ui, |ui| {
+                                for m in REPEAT_MINUTES {
+                                    ui.selectable_value(&mut n.repeat_minutes, m, text(m));
+                                }
+                            });
+                            ui.label(w::muted("while problems stay open"));
+                        });
+                        ui.end_row();
+                    });
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Test warning").clicked() {
+                        test = Some(Severity::Warning);
+                    }
+                    if ui.button("Test critical").clicked() {
+                        test = Some(Severity::Critical);
+                    }
+                    ui.label(w::muted("A problem is announced once, and again if it gets worse."));
+                });
+
+                ui.add_space(6.0);
+                w::section(ui, "Data", "");
+                egui::Grid::new("data-form").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                    ui.label("Refresh every");
+                    egui::ComboBox::from_id_salt("settings-interval")
+                        .width(110.0)
+                        .selected_text(format!("{} s", self.config.interval_secs))
+                        .show_ui(ui, |ui| {
+                            for v in INTERVALS {
+                                ui.selectable_value(&mut self.config.interval_secs, v, format!("{v} s"));
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Keep history for");
+                    egui::ComboBox::from_id_salt("retention")
+                        .width(110.0)
+                        .selected_text(format!("{} days", self.config.retention_days))
+                        .show_ui(ui, |ui| {
+                            for v in RETENTION_DAYS {
+                                ui.selectable_value(&mut self.config.retention_days, v, format!("{v} days"));
+                            }
+                        });
+                    ui.end_row();
+                    if let Some(paths) = &self.paths {
+                        ui.label("Settings file");
+                        ui.label(w::muted(paths.config.display().to_string()));
+                        ui.end_row();
+                        ui.label("History");
+                        ui.label(w::muted(paths.database.display().to_string()));
+                        ui.end_row();
+                    }
+                });
+                if self.paths.is_none() {
+                    ui.label(w::muted("Demo mode: settings are not saved."));
+                }
+                ui.add_space(4.0);
+                close = ui.button("Close").clicked();
+            });
+
+        if self.config.interval_secs != before.interval_secs {
+            self.env.interval.store(self.config.interval_secs, Ordering::Relaxed);
+        }
+        if self.config.retention_days < before.retention_days {
+            let _ = self.env.store.prune(self.config.retention_days, now_ts());
+        }
+        if self.config.notifications != before.notifications
+            || self.config.interval_secs != before.interval_secs
+            || self.config.retention_days != before.retention_days
+        {
+            self.apply_notifications();
+        }
+        if let Some(severity) = test {
+            self.env.notifier.test(severity);
+        }
+        if !open || close {
+            self.settings_open = false;
         }
     }
 
@@ -852,6 +1013,16 @@ fn cores_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
             ),
         ],
     );
+    if s.info.no_per_core {
+        w::card(ui, |ui| {
+            ui.label(RichText::new("This Mac does not report usage per core").strong());
+            ui.label(w::muted(
+                "gridwatch reads the per-core counters through python3, which comes with the Xcode command line tools 
+                 (xcode-select --install) or Homebrew. Without it only the total on the CPU tab is available.",
+            ));
+        });
+        return;
+    }
     let columns = ((ui.available_width() / 270.0) as usize).clamp(1, 8);
     let indices: Vec<usize> = (0..s.cores.len()).collect();
     for row in indices.chunks(columns) {
@@ -964,7 +1135,7 @@ fn docker_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64), s
                 DockerState::Error(msg) => {
                     w::status(ui, w::WARNING, "Docker is installed but could not be queried");
                     ui.label(RichText::new(msg).color(w::TEXT_SECONDARY));
-                    ui.label(w::muted("Usually the SSH user is not in the docker group: sudo usermod -aG docker <user>"));
+                    ui.label(w::muted("Either the docker daemon is not running, or the SSH user is not in the docker group (sudo usermod -aG docker <user>)."));
                 }
                 _ => {
                     ui.label(w::muted("Waiting for the first docker measurement…"));

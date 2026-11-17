@@ -86,6 +86,8 @@ pub struct HostInfo {
     pub os: String,
     pub cpu_model: String,
     pub reboot_required: bool,
+    /// The host reports only total CPU usage (macOS without Python).
+    pub no_per_core: bool,
 }
 
 #[derive(Clone, Debug, Default)]

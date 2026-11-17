@@ -1,8 +1,8 @@
 # gridwatch
 
-A desktop dashboard for Windows, Linux and macOS that watches Linux servers over SSH.
-Nothing is installed on the monitored machines: gridwatch logs in, reads `/proc`, `df`, `ps`
-and the docker CLI, and draws the result.
+A desktop dashboard for Windows, Linux and macOS that watches Linux and macOS machines over SSH.
+Nothing is installed on the monitored machines: gridwatch logs in, reads `/proc` (or `sysctl` and
+`vm_stat` on a Mac), `df`, `ps` and the docker CLI, and draws the result.
 
 ![Overview](docs/screenshots/overview.png)
 
@@ -22,6 +22,8 @@ and the docker CLI, and draws the result.
 - **Suggestions** for saturated CPU, load above core count, I/O wait, CPU steal, memory and swap
   pressure, full disks, high temperature, zombie processes, pending reboots, containers that
   restart, fail, are unhealthy, run without or close to their memory limit, and more.
+- **Alerts** - a sound and a desktop notification (Windows, macOS, Linux) when a server gets into
+  trouble or cannot be reached. One click on the bell in the top bar switches them off and on.
 
 | CPU | Cores |
 | --- | --- |
@@ -35,6 +37,26 @@ and the docker CLI, and draws the result.
 
 The screenshots show the built-in demo data (`gridwatch --demo`).
 
+## Alerts and settings
+
+![Settings](docs/screenshots/settings.png)
+
+A problem is announced once when it appears, and again only if it gets worse; a value that hovers
+around its threshold does not ring every few seconds. Alerts also arrive while the window is
+minimised. The **Alerts on / off** button in the top bar is the master switch. **Settings** has the rest:
+
+| Setting | Effect |
+| --- | --- |
+| Play a sound, volume | a two-note chime for warnings, three beeps for critical problems |
+| Show a desktop notification | names the server and the new problems |
+| Alert on | warnings and critical problems, or critical only |
+| Server unreachable | alert when the SSH connection is lost or cannot be made |
+| Remind me | repeat the alert every 5 to 60 minutes while problems stay open |
+| Refresh every, Keep history for | poll interval and how long history stays in the database |
+
+On Windows the notification is shown under the name of Windows PowerShell, because gridwatch
+has no installer that could register its own name.
+
 ## Build and run
 
 Requires a recent Rust toolchain (edition 2024) and a C compiler (for the bundled SQLite and `ring`).
@@ -44,7 +66,7 @@ cargo run --release
 ```
 
 On Linux the usual desktop libraries for a windowed app are needed, e.g. on Debian/Ubuntu:
-`sudo apt install build-essential libxkbcommon-dev libwayland-dev`.
+`sudo apt install build-essential pkg-config libxkbcommon-dev libwayland-dev libasound2-dev`.
 
 Try it without any server:
 
@@ -87,13 +109,20 @@ The remote user needs no special rights. To see containers it must be allowed to
 
 ## Requirements on the monitored machine
 
-Linux with `/proc`, a POSIX `sh`, `df` and procps `ps`. Per-core frequency and temperature
+**Linux** with `/proc`, a POSIX `sh`, `df` and procps `ps`. Per-core frequency and temperature
 are shown when the kernel exposes them (`/proc/cpuinfo`, `/sys/class/thermal`).
+
+**macOS** with Remote Login enabled (System Settings > General > Sharing). Usage per core is read
+through `python3`, which comes with the Xcode command line tools (`xcode-select --install`) or
+Homebrew; without it only the total CPU usage is shown. macOS does not expose temperature, clock
+frequency or I/O wait to an ordinary user, so those stay empty. Docker is found in
+`/usr/local/bin` and `/opt/homebrew/bin` and needs Docker Desktop (or another daemon) running.
 
 ## Development
 
 ```sh
-cargo test      # parsers, history store, suggestion rules
+cargo test      # parsers, history store, suggestion and alert rules
+GRIDWATCH_TEST_HOST=user@host cargo test live_host -- --ignored --nocapture   # poll a real machine once
 cargo run -- --demo --screenshot docs/screenshots --delay 2   # regenerate the screenshots
 ```
 
@@ -104,5 +133,6 @@ cargo run -- --demo --screenshot docs/screenshots --delay 2   # regenerate the s
 | `src/collector.rs` | one polling task per server |
 | `src/store.rs` | SQLite history and the config file |
 | `src/suggest.rs` | suggestion rules |
+| `src/notify.rs` | alert sound and desktop notifications |
 | `src/app.rs`, `src/widgets.rs` | the egui user interface |
 | `src/demo.rs` | simulated servers |
