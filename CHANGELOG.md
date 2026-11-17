@@ -4,6 +4,14 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.8.0
+
+- **Notifications with colour**: desktop notifications start with a red or yellow mark for the
+  severity, and each problem carries a symbol for its topic (disk, temperature, memory, CPU,
+  container, GPU, connection). Can be switched off in the settings.
+- **Choice of sounds**: warnings and critical problems each get one of five sounds - Chime, Beeps,
+  Bell, Sonar or Alarm. The test buttons play the chosen ones.
+
 ## 0.7.2
 
 - About: the link to the website is a third large button, with the GitHub mark.

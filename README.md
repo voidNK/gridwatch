@@ -203,6 +203,7 @@ cargo run -- --demo --screenshot docs/screenshots --delay 2   # regenerate the s
 GRIDWATCH_TEST_HOST=user@host cargo test live_host -- --ignored --nocapture   # poll a machine over ssh
 cargo test local_shell -- --ignored --nocapture                               # poll this computer (WSL on Windows)
 cargo test keychain -- --ignored                                              # write to and read from the keychain
+cargo test hear_and_see -- --ignored                                          # play two alert sounds and show a notification
 cargo test real_release -- --ignored --nocapture                              # download the latest release and run it
 ```
 

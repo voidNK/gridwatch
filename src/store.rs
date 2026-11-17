@@ -51,6 +51,35 @@ pub struct Notifications {
     pub volume: f32,
     /// Alert again while problems stay open; 0 = only once.
     pub repeat_minutes: u32,
+    /// A coloured mark and a symbol for the topic in desktop notifications.
+    pub emoji: bool,
+    pub warning_tone: Tone,
+    pub critical_tone: Tone,
+}
+
+/// The sounds an alert can make.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tone {
+    #[default]
+    Chime,
+    Beeps,
+    Bell,
+    Sonar,
+    Alarm,
+}
+
+impl Tone {
+    pub const ALL: [Tone; 5] = [Tone::Chime, Tone::Beeps, Tone::Bell, Tone::Sonar, Tone::Alarm];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tone::Chime => "Chime",
+            Tone::Beeps => "Beeps",
+            Tone::Bell => "Bell",
+            Tone::Sonar => "Sonar",
+            Tone::Alarm => "Alarm",
+        }
+    }
 }
 
 impl Default for Notifications {
@@ -63,6 +92,9 @@ impl Default for Notifications {
             offline: true,
             volume: 0.7,
             repeat_minutes: 0,
+            emoji: true,
+            warning_tone: Tone::Chime,
+            critical_tone: Tone::Beeps,
         }
     }
 }

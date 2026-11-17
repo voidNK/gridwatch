@@ -3,7 +3,7 @@
 use crate::collector::{self, Env};
 use crate::model::*;
 use crate::notify::Notifier;
-use crate::store::{Config, Notifications, Paths, Store};
+use crate::store::{Config, Notifications, Paths, Store, Tone};
 use crate::suggest::{self, Severity, Suggestion};
 use crate::update::{self, Release};
 use crate::widgets::{self as w, ChartOptions, Series};
@@ -1053,6 +1053,32 @@ Click to switch on or off.",
                                         ui.end_row();
                                         ui.checkbox(&mut n.desktop, "Show a desktop notification");
                                         ui.label(w::muted("Windows toast, macOS Notification Center, Linux desktop"));
+                                        ui.end_row();
+                                        ui.add_enabled(
+                                            n.desktop,
+                                            egui::Checkbox::new(&mut n.emoji, "Emojis in notifications"),
+                                        );
+                                        ui.label(w::muted("a coloured mark for the severity, a symbol for the topic"));
+                                        ui.end_row();
+                                        ui.label("Sounds");
+                                        ui.add_enabled_ui(n.sound, |ui| {
+                                            ui.horizontal(|ui| {
+                                                for (label, tone) in [
+                                                    ("warning", &mut n.warning_tone),
+                                                    ("critical", &mut n.critical_tone),
+                                                ] {
+                                                    ui.label(w::muted(label));
+                                                    egui::ComboBox::from_id_salt(("tone", label))
+                                                        .width(90.0)
+                                                        .selected_text(tone.label())
+                                                        .show_ui(ui, |ui| {
+                                                            for choice in Tone::ALL {
+                                                                ui.selectable_value(tone, choice, choice.label());
+                                                            }
+                                                        });
+                                                }
+                                            });
+                                        });
                                         ui.end_row();
                                         ui.label("Alert on");
                                         ui.horizontal(|ui| {

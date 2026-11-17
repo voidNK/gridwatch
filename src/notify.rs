@@ -4,7 +4,7 @@
 //! while the window is minimised.
 
 use crate::model::{ConnState, ServerState};
-use crate::store::Notifications;
+use crate::store::{Notifications, Tone};
 use crate::suggest::{self, Severity};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -76,7 +76,7 @@ impl Tracker {
 }
 
 enum Job {
-    Sound(Severity, f32),
+    Sound(Tone, f32),
     Desktop {
         summary: String,
         body: String,
@@ -100,7 +100,7 @@ impl Notifier {
             .spawn(move || {
                 for job in queue {
                     let result = match job {
-                        Job::Sound(severity, volume) => play(severity, volume),
+                        Job::Sound(tone, volume) => play(tone, volume),
                         Job::Desktop {
                             summary,
                             body,
@@ -133,12 +133,19 @@ impl Notifier {
     pub fn test(&self, severity: Severity) {
         let settings = self.settings.lock().unwrap().clone();
         if settings.sound {
-            let _ = self.jobs.send(Job::Sound(severity, settings.volume));
+            let _ = self
+                .jobs
+                .send(Job::Sound(tone_for(&settings, severity), settings.volume));
         }
         if settings.desktop {
+            let example = Alert {
+                key: "disk".into(),
+                severity,
+                title: format!("This is what a {} alert looks like", severity.label().to_lowercase()),
+            };
             let _ = self.jobs.send(Job::Desktop {
-                summary: "gridwatch test".into(),
-                body: "This is what an alert looks like.".into(),
+                summary: summary(&settings, "gridwatch test", severity, false, 1),
+                body: line(&settings, &example),
                 critical: false,
             });
         }
@@ -182,18 +189,12 @@ impl Notifier {
         let list: Vec<&Alert> = if reminder { open } else { new.iter().collect() };
         let severity = list.iter().map(|a| a.severity).min().unwrap_or(Severity::Warning);
         if settings.desktop {
-            let summary = match (reminder, list.len()) {
-                (true, 1) => format!("{server_name}: still 1 open problem"),
-                (true, n) => format!("{server_name}: still {n} open problems"),
-                (false, 1) => format!("{server_name}: {}", severity.label().to_lowercase()),
-                (false, n) => format!("{server_name}: {n} new problems"),
-            };
-            let mut lines: Vec<&str> = list.iter().take(4).map(|a| a.title.as_str()).collect();
+            let mut lines: Vec<String> = list.iter().take(4).map(|a| line(&settings, a)).collect();
             if list.len() > lines.len() {
-                lines.push("…");
+                lines.push("…".to_string());
             }
             let _ = self.jobs.send(Job::Desktop {
-                summary,
+                summary: summary(&settings, server_name, severity, reminder, list.len()),
                 body: lines.join("\n"),
                 critical: severity == Severity::Critical,
             });
@@ -202,20 +203,88 @@ impl Notifier {
             let mut last = self.last_sound.lock().unwrap();
             if last.is_none_or(|at| now.duration_since(at) >= SOUND_GAP) {
                 *last = Some(now);
-                let _ = self.jobs.send(Job::Sound(severity, settings.volume));
+                let _ = self
+                    .jobs
+                    .send(Job::Sound(tone_for(&settings, severity), settings.volume));
             }
         }
     }
 }
 
-/// The alert tones are synthesised, so no sound files have to be shipped.
-/// Returns mono samples: a rising two-note chime for warnings, three urgent beeps for critical.
-fn tone(severity: Severity, volume: f32, rate: u32) -> Vec<f32> {
-    // (frequency in Hz, start in seconds, length in seconds)
-    let notes: &[(f32, f32, f32)] = if severity == Severity::Critical {
-        &[(988.0, 0.0, 0.16), (988.0, 0.22, 0.16), (1319.0, 0.44, 0.38)]
+fn tone_for(settings: &Notifications, severity: Severity) -> Tone {
+    if severity == Severity::Critical {
+        settings.critical_tone
     } else {
-        &[(659.0, 0.0, 0.22), (880.0, 0.16, 0.42)]
+        settings.warning_tone
+    }
+}
+
+/// The headline of a notification, e.g. "🔴 db-01: 2 new problems".
+fn summary(settings: &Notifications, server: &str, severity: Severity, reminder: bool, count: usize) -> String {
+    let text = match (reminder, count) {
+        (true, 1) => format!("{server}: still 1 open problem"),
+        (true, n) => format!("{server}: still {n} open problems"),
+        (false, 1) => format!("{server}: {}", severity.label().to_lowercase()),
+        (false, n) => format!("{server}: {n} new problems"),
+    };
+    if !settings.emoji {
+        return text;
+    }
+    let mark = if severity == Severity::Critical { "🔴" } else { "🟡" };
+    format!("{mark} {text}")
+}
+
+/// One alert as a line of a notification, with a symbol for what it is about.
+fn line(settings: &Notifications, alert: &Alert) -> String {
+    if !settings.emoji {
+        return alert.title.clone();
+    }
+    let title = alert.title.to_lowercase();
+    let about = |words: &[&str]| words.iter().any(|w| title.contains(w));
+    let symbol = if alert.key == "offline" {
+        "🔌"
+    } else if about(&["temperature", "°c"]) {
+        "🌡️"
+    } else if about(&["container", "docker"]) {
+        "🐳"
+    } else if about(&["gpu"]) {
+        "🎮"
+    } else if about(&["disk"]) {
+        "💾"
+    } else if about(&["memory", "swap"]) {
+        "🧠"
+    } else if about(&["cpu", "load", "core", "i/o wait"]) {
+        "🔥"
+    } else if about(&["zombie"]) {
+        "🧟"
+    } else {
+        "⚠️"
+    };
+    format!("{symbol} {}", alert.title)
+}
+
+/// The alert tones are synthesised, so no sound files have to be shipped.
+/// Returns mono samples.
+fn tone(kind: Tone, volume: f32, rate: u32) -> Vec<f32> {
+    // (frequency in Hz, start in seconds, length in seconds)
+    let notes: &[(f32, f32, f32)] = match kind {
+        // Two rising notes.
+        Tone::Chime => &[(659.0, 0.0, 0.22), (880.0, 0.16, 0.42)],
+        // Three short beeps, the last one higher.
+        Tone::Beeps => &[(988.0, 0.0, 0.16), (988.0, 0.22, 0.16), (1319.0, 0.44, 0.38)],
+        // One struck bell: a note with two overtones ringing out.
+        Tone::Bell => &[(1047.0, 0.0, 1.1), (1568.0, 0.0, 0.8), (2093.0, 0.0, 0.5)],
+        // Two soft pings, like an echo sounder.
+        Tone::Sonar => &[(740.0, 0.0, 0.55), (740.0, 0.75, 0.55)],
+        // High and low in turn; hard to miss.
+        Tone::Alarm => &[
+            (880.0, 0.0, 0.18),
+            (660.0, 0.2, 0.18),
+            (880.0, 0.4, 0.18),
+            (660.0, 0.6, 0.18),
+            (880.0, 0.8, 0.18),
+            (660.0, 1.0, 0.18),
+        ],
     };
     let length = notes.iter().map(|n| n.1 + n.2).fold(0.0, f32::max);
     let mut samples = vec![0.0f32; (length * rate as f32) as usize];
@@ -228,17 +297,23 @@ fn tone(severity: Severity, volume: f32, rate: u32) -> Vec<f32> {
             let phase = std::f32::consts::TAU * freq * t;
             let wave = phase.sin() + 0.25 * (2.0 * phase).sin();
             if let Some(sample) = samples.get_mut(first + i) {
-                *sample += wave * envelope * 0.3 * volume.clamp(0.0, 1.0);
+                *sample += wave * envelope * 0.3;
             }
         }
+    }
+    // Notes that sound together add up; keep the loudest moment the same for every tone.
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs())).max(0.001);
+    let gain = 0.36 / peak * volume.clamp(0.0, 1.0);
+    for sample in &mut samples {
+        *sample *= gain;
     }
     samples
 }
 
-fn play(severity: Severity, volume: f32) -> Result<(), String> {
+fn play(kind: Tone, volume: f32) -> Result<(), String> {
     use std::num::NonZero;
     const RATE: u32 = 44_100;
-    let samples = tone(severity, volume, RATE);
+    let samples = tone(kind, volume, RATE);
     let length = Duration::from_secs_f32(samples.len() as f32 / RATE as f32);
     // Opened per sound: follows a changed default device and holds none while quiet.
     let mut sink = rodio::DeviceSinkBuilder::open_default_sink().map_err(|e| format!("no audio output: {e}"))?;
@@ -351,9 +426,60 @@ mod tests {
     }
 
     #[test]
+    fn notifications_carry_marks_only_when_wanted() {
+        let mut settings = Notifications::default();
+        let disk = alert("Disk / is 97% full", Severity::Critical);
+        let offline = Alert {
+            key: "offline".into(),
+            ..alert("Connection lost: timeout", Severity::Critical)
+        };
+        assert_eq!(
+            summary(&settings, "db-01", Severity::Critical, false, 2),
+            "🔴 db-01: 2 new problems"
+        );
+        assert_eq!(
+            summary(&settings, "db-01", Severity::Warning, true, 1),
+            "🟡 db-01: still 1 open problem"
+        );
+        assert_eq!(line(&settings, &disk), "💾 Disk / is 97% full");
+        assert_eq!(line(&settings, &offline), "🔌 Connection lost: timeout");
+        assert_eq!(
+            line(&settings, &alert("High temperature: 91 °C", Severity::Critical)),
+            "🌡️ High temperature: 91 °C"
+        );
+        assert_eq!(
+            line(&settings, &alert("Something new", Severity::Warning)),
+            "⚠️ Something new"
+        );
+        settings.emoji = false;
+        assert_eq!(
+            summary(&settings, "db-01", Severity::Critical, false, 1),
+            "db-01: critical"
+        );
+        assert_eq!(line(&settings, &disk), "Disk / is 97% full");
+    }
+
+    /// Makes noise and shows a notification on this computer: `cargo test hear_and_see -- --ignored`
+    #[test]
+    #[ignore]
+    fn hear_and_see() {
+        let settings = Notifications::default();
+        let example = alert("Disk / is 97% full", Severity::Critical);
+        show(
+            &summary(&settings, "db-01", Severity::Critical, false, 1),
+            &line(&settings, &example),
+            false,
+        )
+        .unwrap();
+        for kind in [Tone::Bell, Tone::Sonar] {
+            play(kind, 0.4).unwrap();
+        }
+    }
+
+    #[test]
     fn tones_stay_within_range() {
-        for severity in [Severity::Warning, Severity::Critical] {
-            let samples = tone(severity, 1.0, 44_100);
+        for kind in Tone::ALL {
+            let samples = tone(kind, 1.0, 44_100);
             assert!(samples.len() > 20_000);
             assert!(samples.iter().all(|s| s.abs() <= 1.0));
             assert!(samples.last().unwrap().abs() < 0.01);
