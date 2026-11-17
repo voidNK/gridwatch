@@ -86,6 +86,10 @@ has no installer that could register its own name. On macOS it appears under Fin
 Every version is built for Windows, Linux and macOS by GitHub Actions and published on the
 **Releases** page of the repository. Unpack the archive and start `gridwatch`.
 
+On macOS the archive contains `gridwatch.app`; move it to Applications. The app is not notarised
+by Apple, so the first start needs a right click and *Open* (or, if macOS calls it damaged,
+`xattr -dr com.apple.quarantine gridwatch.app` in a terminal).
+
 ## Updates
 
 gridwatch asks GitHub at start whether a newer version exists. If so, an **Update to ...** button

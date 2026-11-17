@@ -69,6 +69,15 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/gridwatch.exe" "$name/"
             7z a "$name.zip" "$name"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            # An application bundle: started by double click, it opens no Terminal window.
+            app="$name/gridwatch.app"
+            mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+            cp "target/${{ matrix.target }}/release/gridwatch" "$app/Contents/MacOS/"
+            sed "s/@VERSION@/${GITHUB_REF_NAME#v}/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+            codesign --force --deep --sign - "$app"
+            codesign --verify --deep --strict "$app"
+            tar -czf "$name.tar.gz" "$name"
           else
             cp "target/${{ matrix.target }}/release/gridwatch" "$name/"
             tar -czf "$name.tar.gz" "$name"

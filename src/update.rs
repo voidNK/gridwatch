@@ -106,7 +106,8 @@ pub fn check() -> Result<Option<Release>> {
 }
 
 /// Take the program out of a release archive. Archives hold one folder named like the
-/// archive, with `gridwatch` (or `gridwatch.exe`) inside.
+/// archive, with `gridwatch` (or `gridwatch.exe`) inside; on macOS it sits in an
+/// application bundle, `gridwatch.app/Contents/MacOS/gridwatch`.
 fn extract(archive: &str, bytes: &[u8]) -> Result<Vec<u8>> {
     let mut program = Vec::new();
     if let Some(folder) = archive.strip_suffix(".zip") {
@@ -116,11 +117,17 @@ fn extract(archive: &str, bytes: &[u8]) -> Result<Vec<u8>> {
             .context("the archive does not contain gridwatch.exe")?;
         file.read_to_end(&mut program)?;
     } else if let Some(folder) = archive.strip_suffix(".tar.gz") {
-        let wanted = format!("{folder}/gridwatch");
+        let wanted = [
+            format!("{folder}/gridwatch"),
+            format!("{folder}/gridwatch.app/Contents/MacOS/gridwatch"),
+        ];
         let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
         for entry in tar.entries().context("the download is not a tar archive")? {
             let mut entry = entry?;
-            if entry.path()?.to_string_lossy() == wanted {
+            if wanted
+                .iter()
+                .any(|w| entry.path().is_ok_and(|p| p.to_string_lossy() == *w))
+            {
                 entry.read_to_end(&mut program)?;
                 break;
             }
@@ -168,7 +175,17 @@ pub fn install(release: &Release) -> Result<()> {
     }
     let replaced = self_replace::self_replace(&staged).context("cannot replace the program (is its folder writable?)");
     let _ = std::fs::remove_file(&staged);
-    replaced
+    replaced?;
+    // Inside an application bundle the signature covers the program; sign the bundle
+    // again so macOS keeps accepting it. Failing here does not undo the update.
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = current.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) {
+        let _ = std::process::Command::new("codesign")
+            .args(["--force", "--deep", "--sign", "-"])
+            .arg(bundle)
+            .output();
+    }
+    Ok(())
 }
 
 /// Start the program again; the caller closes this instance.
@@ -241,6 +258,30 @@ mod tests {
             b"linux program"
         );
         assert!(extract("gridwatch-v1-linux-x86_64.tar.gz", &zipped).is_err());
+
+        // macOS releases carry the program inside an application bundle.
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+        for (path, content) in [
+            (
+                "gridwatch-v1-macos-arm64/gridwatch.app/Contents/Info.plist",
+                &b"plist"[..],
+            ),
+            (
+                "gridwatch-v1-macos-arm64/gridwatch.app/Contents/MacOS/gridwatch",
+                b"mac program",
+            ),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, path, content).unwrap();
+        }
+        let bundled = tar.into_inner().unwrap().finish().unwrap();
+        assert_eq!(
+            extract("gridwatch-v1-macos-arm64.tar.gz", &bundled).unwrap(),
+            b"mac program"
+        );
     }
 
     /// Downloads the latest real release and checks it: `cargo test real_release -- --ignored --nocapture`
