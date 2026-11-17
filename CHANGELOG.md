@@ -4,6 +4,11 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.4.1
+
+- The server list is compact: one line per server instead of five, so many servers fit without
+  scrolling. The address, the state and the number of alerts appear when the pointer rests on a server.
+
 ## 0.4.0
 
 - The GPU tab now comes right after the overview, before CPU.

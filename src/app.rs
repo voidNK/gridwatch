@@ -618,40 +618,55 @@ Click to switch on or off.",
                 let response = Frame::new()
                     .fill(fill)
                     .stroke(egui::Stroke::new(1.0, if selected { w::AXIS } else { w::GRID }))
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(Margin::same(10))
+                    .corner_radius(CornerRadius::same(5))
+                    .inner_margin(Margin::symmetric(8, 3))
                     .show(ui, |ui| {
+                        // One line per server, so that many of them fit without scrolling:
+                        // state and name on the left, CPU and memory on the right.
                         ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        let (color, label) = conn_status(&state);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&server.cfg.name).strong());
+                            let (dot, _) = ui.allocate_exact_size(egui::Vec2::splat(9.0), Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 4.5, color);
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let (color, label) = conn_status(&state);
-                                w::status(ui, color, label);
+                                let small = |text: String, color: Color32| RichText::new(text).size(11.5).color(color);
+                                match &state.latest {
+                                    Some(s) if matches!(state.conn, ConnState::Online) => {
+                                        let mem = s.mem_used as f32 / s.mem_total.max(1) as f32 * 100.0;
+                                        for (name, value) in [("mem", mem), ("cpu", s.cpu.total)] {
+                                            let level = w::level(value, 85.0, 95.0).map_or(w::TEXT_SECONDARY, |l| l.0);
+                                            ui.label(small(format!("{value:.0}%"), level));
+                                            ui.label(small(name.to_string(), w::MUTED));
+                                        }
+                                    }
+                                    // Not online: the state in words instead of numbers.
+                                    _ => {
+                                        ui.label(small(label.to_string(), w::TEXT_SECONDARY));
+                                    }
+                                }
+                                if alerts > 0 {
+                                    ui.label(small(format!("{alerts} !"), w::WARNING));
+                                }
+                                // The name gets what is left and is cut off if it does not fit.
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    ui.add(egui::Label::new(RichText::new(&server.cfg.name).strong()).truncate());
+                                });
                             });
                         });
-                        ui.label(w::muted(server.cfg.address()));
-                        if let Some(s) = &state.latest {
-                            let mem = s.mem_used as f32 / s.mem_total.max(1) as f32;
-                            for (label, fraction) in [("CPU", s.cpu.total / 100.0), ("MEM", mem)] {
-                                ui.horizontal(|ui| {
-                                    ui.label(w::muted(label));
-                                    w::meter(ui, fraction, 120.0);
-                                    ui.label(
-                                        RichText::new(format!("{:.0}%", fraction * 100.0)).color(w::TEXT_SECONDARY),
-                                    );
-                                });
-                            }
-                            if alerts > 0 {
-                                w::status(
-                                    ui,
-                                    w::WARNING,
-                                    &format!("{alerts} alert{}", if alerts == 1 { "" } else { "s" }),
-                                );
-                            }
-                        }
                     })
                     .response
-                    .interact(Sense::click_and_drag());
+                    .interact(Sense::click_and_drag())
+                    .on_hover_text(format!(
+                        "{}\n{}{}",
+                        server.cfg.address(),
+                        conn_status(&state).1,
+                        match alerts {
+                            0 => String::new(),
+                            1 => ", 1 alert".to_string(),
+                            n => format!(", {n} alerts"),
+                        }
+                    ));
                 cards.push(response.rect);
                 if response.clicked() {
                     clicked = Some(i);
@@ -659,7 +674,6 @@ Click to switch on or off.",
                 if response.drag_started() {
                     self.dragging = Some(i);
                 }
-                ui.add_space(2.0);
             }
 
             // While a card is dragged, a line shows where it would land.
