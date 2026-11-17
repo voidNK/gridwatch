@@ -5,6 +5,7 @@ use crate::model::*;
 use crate::notify::Notifier;
 use crate::store::{Config, Notifications, Paths, Store, Tone};
 use crate::suggest::{self, Severity, Suggestion};
+use crate::tray::{self, Tray};
 use crate::update::{self, Release};
 use crate::widgets::{self as w, ChartOptions, Series};
 use crate::{Args, demo, now_ts, secrets};
@@ -115,6 +116,14 @@ pub struct App {
     /// Written by the background task that asks GitHub or installs.
     update: Arc<Mutex<UpdateState>>,
     update_open: bool,
+    tray: Option<Tray>,
+    /// The system has no tray; do not try again every frame.
+    tray_failed: bool,
+    tray_refreshed: Instant,
+    /// The window is closed to the tray.
+    hidden: bool,
+    /// Quit was chosen, so closing the window really ends the program.
+    quitting: bool,
     confirm_remove: bool,
     secret_input: String,
     proc_filter: String,
@@ -197,6 +206,11 @@ impl App {
             settings_open: false,
             update: Arc::default(),
             update_open: false,
+            tray: None,
+            tray_failed: false,
+            tray_refreshed: Instant::now(),
+            hidden: false,
+            quitting: false,
             confirm_remove: false,
             secret_input: String::new(),
             proc_filter: String::new(),
@@ -533,6 +547,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.drive_screenshots(&ctx);
+        self.drive_tray(&ctx);
         if self.last_prune.elapsed() > Duration::from_secs(3600) {
             self.last_prune = Instant::now();
             let _ = self.env.store.prune(self.config.retention_days, now_ts());
@@ -1168,6 +1183,14 @@ Click to switch on or off.",
                                 ui.add_space(6.0);
                                 w::section(ui, "This computer", "");
                                 ui.checkbox(&mut self.config.show_local, "Show this computer in the server list");
+                                if cfg!(any(windows, target_os = "macos")) {
+                                    ui.horizontal(|ui| {
+                                        ui.checkbox(&mut self.config.tray, "Keep running in the tray");
+                                        ui.label(w::muted(
+                                            "closing the window hides it; Quit is in the menu of the tray icon",
+                                        ));
+                                    });
+                                }
                                 if cfg!(windows) {
                                     ui.horizontal(|ui| {
                                         ui.checkbox(&mut self.config.show_wsl, "Show its Linux (WSL)");
@@ -1389,12 +1412,117 @@ Click to switch on or off.",
         }
         if restart {
             match update::restart() {
-                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Ok(()) => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
                 Err(e) => *self.update.lock().unwrap() = UpdateState::CheckFailed(format!("{e:#}")),
             }
         }
         if !open || close {
             self.update_open = false;
+        }
+    }
+
+    fn show_window(&mut self, ctx: &egui::Context, show: bool) {
+        self.hidden = !show;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(show));
+        if show {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
+    /// The worst state among all servers, and a line that says it in words.
+    fn tray_status(&self) -> (tray::Level, String) {
+        let (mut critical, mut warning, mut measured) = (0, 0, 0);
+        for server in &self.servers {
+            let state = server.shared.lock().unwrap();
+            let alerts = crate::notify::alerts(&state);
+            if state.latest.is_some() || !alerts.is_empty() {
+                measured += 1;
+            }
+            if alerts.iter().any(|a| a.severity == Severity::Critical) {
+                critical += 1;
+            } else if !alerts.is_empty() {
+                warning += 1;
+            }
+        }
+        let level = match (measured, critical, warning) {
+            (0, _, _) => tray::Level::Unknown,
+            (_, 0, 0) => tray::Level::Good,
+            (_, 0, _) => tray::Level::Warning,
+            _ => tray::Level::Critical,
+        };
+        let servers = format!(
+            "{} server{}",
+            self.servers.len(),
+            if self.servers.len() == 1 { "" } else { "s" }
+        );
+        let text = match level {
+            tray::Level::Unknown => format!("gridwatch: {servers}, waiting for the first numbers"),
+            tray::Level::Good => format!("gridwatch: {servers}, all fine"),
+            _ => {
+                let mut parts = Vec::new();
+                if critical > 0 {
+                    parts.push(format!("{critical} critical"));
+                }
+                if warning > 0 {
+                    parts.push(format!("{warning} with warnings"));
+                }
+                format!("gridwatch: {servers}, {}", parts.join(", "))
+            }
+        };
+        (level, text)
+    }
+
+    /// The tray icon: follow the setting, react to clicks, show the state of the servers,
+    /// and hide the window instead of ending the program when it is closed.
+    fn drive_tray(&mut self, ctx: &egui::Context) {
+        let wanted = self.config.tray && !self.is_demo() && self.screenshots.is_none();
+        if wanted && self.tray.is_none() && !self.tray_failed {
+            self.tray = Tray::new(ctx, self.config.notifications.enabled);
+            self.tray_failed = self.tray.is_none();
+        } else if !wanted && self.tray.is_some() {
+            self.tray = None;
+            self.show_window(ctx, true);
+        }
+        if self.tray.is_none() {
+            return;
+        }
+
+        let actions = self.tray.as_mut().map(|t| t.poll()).unwrap_or_default();
+        for action in actions {
+            match action {
+                // A click brings a hidden or covered window to the front and hides it when it is there already.
+                tray::Action::Toggle => {
+                    let in_front = !self.hidden && ctx.input(|i| i.viewport().focused) == Some(true);
+                    self.show_window(ctx, !in_front);
+                }
+                tray::Action::Show => self.show_window(ctx, true),
+                tray::Action::ToggleAlerts => {
+                    self.config.notifications.enabled = !self.config.notifications.enabled;
+                    self.apply_notifications();
+                }
+                tray::Action::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.show_window(ctx, false);
+        }
+
+        if self.tray_refreshed.elapsed() >= Duration::from_secs(1) {
+            self.tray_refreshed = Instant::now();
+            let (level, text) = self.tray_status();
+            let alerts_on = self.config.notifications.enabled;
+            if let Some(tray) = &mut self.tray {
+                tray.update(level, &text, alerts_on);
+            }
         }
     }
 

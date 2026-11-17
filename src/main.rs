@@ -15,6 +15,7 @@ mod secrets;
 mod ssh;
 mod store;
 mod suggest;
+mod tray;
 mod update;
 mod widgets;
 

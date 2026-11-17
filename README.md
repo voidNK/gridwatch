@@ -31,6 +31,8 @@ reads `/proc` (or `sysctl` and `vm_stat` on a Mac), `df`, `ps` and the docker CL
 - **Suggestions** for saturated CPU, load above core count, I/O wait, CPU steal, memory and swap
   pressure, full or saturated disks, hot CPUs, disks and GPUs, zombie processes, pending reboots,
   containers that restart, fail, are unhealthy, run without or close to their memory limit, and more.
+- **Tray icon** on Windows and macOS - shows the worst state of all servers; closing the window
+  keeps gridwatch running there, so alerts keep coming.
 - **Alerts** - a sound and a desktop notification (Windows, macOS, Linux) when a server gets into
   trouble or cannot be reached. One click on the bell in the top bar switches them off and on.
 
@@ -75,6 +77,7 @@ minimised. The **Alerts on / off** button in the top bar is the master switch. *
 | Remind me | repeat the alert every 5 to 60 minutes while problems stay open |
 | Refresh every, Keep history for | poll interval and how long history stays in the database |
 | Show this computer | list the computer gridwatch runs on |
+| Keep running in the tray | closing the window hides it in the tray; *Quit* is in the menu of the tray icon |
 | Show its Linux (WSL) | Windows only: list the default WSL distribution. Watching it keeps WSL running |
 | Save passwords in the system keychain | see below |
 
@@ -233,6 +236,7 @@ cargo test real_release -- --ignored --nocapture                              # 
 | `src/update.rs` | looking for and installing a newer release |
 | `src/suggest.rs` | suggestion rules |
 | `src/notify.rs` | alert sound and desktop notifications |
+| `src/tray.rs` | the tray icon |
 | `src/app.rs`, `src/widgets.rs` | the egui user interface |
 | `src/demo.rs` | simulated servers |
 | `packaging/` | the icon, the Inno Setup script for Windows, the app bundle and disk image for macOS |

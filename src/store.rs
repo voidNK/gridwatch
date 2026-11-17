@@ -29,6 +29,9 @@ pub struct Config {
     /// Ask GitHub at start whether a newer version exists.
     #[serde(default = "yes")]
     pub check_updates: bool,
+    /// Show an icon in the tray and keep running there when the window is closed.
+    #[serde(default = "yes")]
+    pub tray: bool,
 }
 
 fn yes() -> bool {
@@ -118,6 +121,7 @@ impl Default for Config {
             show_wsl: false,
             remember_secrets: true,
             check_updates: true,
+            tray: true,
         }
     }
 }

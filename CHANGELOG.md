@@ -4,6 +4,13 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.9.0
+
+- **Tray icon** (Windows and macOS): gridwatch sits in the notification area or menu bar. The icon
+  carries a yellow or red dot when a server has warnings or critical problems, and its tooltip says
+  how many. Closing the window hides it there; a click on the icon brings it back. The menu has
+  Show, Alerts on/off and Quit. Can be switched off in the settings.
+
 ## 0.8.4
 
 - **Installers**: a setup program for Windows (`...-setup.exe`, installs for the current user, with
