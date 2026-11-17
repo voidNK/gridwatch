@@ -2,7 +2,8 @@
 name = "gridwatch"
 version = "0.4.0"
 edition = "2024"
-description = "Desktop dashboard that monitors Linux servers over SSH"
+license-file = "LICENSE"
+description = "Desktop dashboard that watches Linux and macOS machines over SSH"
 
 [dependencies]
 anyhow = "1.0.104"

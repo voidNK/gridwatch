@@ -65,7 +65,7 @@ jobs:
         run: |
           name="gridwatch-$GITHUB_REF_NAME-${{ matrix.name }}"
           mkdir "$name"
-          cp README.md CHANGELOG.md "$name/"
+          cp README.md CHANGELOG.md LICENSE "$name/"
           if [ "$RUNNER_OS" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/gridwatch.exe" "$name/"
             7z a "$name.zip" "$name"

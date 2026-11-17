@@ -163,6 +163,15 @@ The `Release` workflow checks that the tag matches `Cargo.toml`, builds for Wind
 macOS (Apple Silicon and Intel) and attaches the archives to a GitHub release with the notes of
 that version. The `CI` workflow builds and tests every push and pull request on all three systems.
 
+## License
+
+gridwatch is free to use, change and pass on, by private people and by companies alike.
+It may not be sold: neither gridwatch itself nor a changed version of it, and not as a paid
+product, hosted service or support offering that gets its value from gridwatch. The exact terms
+are in [LICENSE](LICENSE): the Apache License 2.0 with the Commons Clause condition. Because of
+that condition it is "source available", not open source in the OSI sense. For a commercial
+licence, ask the licensor.
+
 ## Development
 
 ```sh
