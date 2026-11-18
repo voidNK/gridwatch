@@ -4,6 +4,11 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.10.0
+
+- When a critical problem newly hits a server, its entry in the server list gets a red frame that
+  fades out over 45 seconds, so it catches the eye even when alerts are muted.
+
 ## 0.9.3
 
 - Fixed: on macOS the keychain asked for permission once per server at every start (and again

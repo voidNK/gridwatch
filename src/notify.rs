@@ -88,6 +88,8 @@ pub struct Notifier {
     settings: Mutex<Notifications>,
     trackers: Mutex<HashMap<String, Tracker>>,
     last_sound: Mutex<Option<Instant>>,
+    /// When each server last got a new critical problem, for the red frame in the server list.
+    critical_hits: Mutex<HashMap<String, Instant>>,
     jobs: mpsc::Sender<Job>,
 }
 
@@ -117,6 +119,7 @@ impl Notifier {
             settings: Mutex::new(settings),
             trackers: Mutex::default(),
             last_sound: Mutex::default(),
+            critical_hits: Mutex::default(),
             jobs,
         }
     }
@@ -125,8 +128,14 @@ impl Notifier {
         *self.settings.lock().unwrap() = settings;
     }
 
+    /// How long ago a critical problem newly appeared on this server, if one ever did.
+    pub fn critical_hit(&self, server_id: &str) -> Option<Duration> {
+        self.critical_hits.lock().unwrap().get(server_id).map(Instant::elapsed)
+    }
+
     pub fn forget(&self, server_id: &str) {
         self.trackers.lock().unwrap().remove(server_id);
+        self.critical_hits.lock().unwrap().remove(server_id);
     }
 
     /// Play the alert sound and show a notification even while alerts are switched off (settings dialog).
@@ -168,11 +177,12 @@ impl Notifier {
         let mut trackers = self.trackers.lock().unwrap();
         let tracker = trackers.entry(server_id.to_string()).or_default();
         // Tracking continues while muted, so switching alerts back on is not followed by old news.
-        let new: Vec<Alert> = tracker
-            .update(&current, now)
-            .into_iter()
-            .filter(|a| wanted(a))
-            .collect();
+        let fresh = tracker.update(&current, now);
+        // The server list marks this whatever the alert settings say.
+        if fresh.iter().any(|a| a.severity == Severity::Critical) {
+            self.critical_hits.lock().unwrap().insert(server_id.to_string(), now);
+        }
+        let new: Vec<Alert> = fresh.into_iter().filter(|a| wanted(a)).collect();
         if !settings.enabled || open.is_empty() {
             return;
         }
@@ -474,6 +484,31 @@ mod tests {
         for kind in [Tone::Bell, Tone::Sonar] {
             play(kind, 0.4).unwrap();
         }
+    }
+
+    #[test]
+    fn remembers_when_a_critical_problem_arrived() {
+        // Alerts are off: the mark for the server list must not depend on them.
+        let notifier = Notifier::new(Notifications {
+            enabled: false,
+            ..Default::default()
+        });
+        let mut state = ServerState::default();
+        notifier.check("a", "server a", &state);
+        assert!(notifier.critical_hit("a").is_none());
+
+        state.conn = ConnState::Error("timeout".into());
+        notifier.check("a", "server a", &state);
+        let first = *notifier.critical_hits.lock().unwrap().get("a").unwrap();
+        // The same problem seen again is not a new hit.
+        std::thread::sleep(Duration::from_millis(15));
+        notifier.check("a", "server a", &state);
+        assert_eq!(*notifier.critical_hits.lock().unwrap().get("a").unwrap(), first);
+        assert!(notifier.critical_hit("a").unwrap() >= Duration::from_millis(15));
+        assert!(notifier.critical_hit("b").is_none());
+
+        notifier.forget("a");
+        assert!(notifier.critical_hit("a").is_none());
     }
 
     #[test]

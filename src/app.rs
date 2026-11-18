@@ -29,6 +29,8 @@ const SETTINGS_SHOT: &str = "settings.png";
 const HOMEPAGE: &str = "https://github.com/voidNK/gridwatch";
 const DONATE_PAYPAL: &str = "https://paypal.me/lizo";
 const DONATE_KOFI: &str = "https://ko-fi.com/A0A05OS1A";
+/// How long the red frame around a server takes to fade after a critical problem arrived.
+const CRITICAL_FLASH: Duration = Duration::from_secs(45);
 const INTERVALS: [u64; 5] = [2, 5, 10, 30, 60];
 const RETENTION_DAYS: [u32; 5] = [1, 7, 14, 30, 90];
 /// Minutes between reminders about problems that stay open; 0 = never.
@@ -667,6 +669,7 @@ Click to switch on or off.",
         ui.add_space(2.0);
         let mut clicked = None;
         let mut dropped = None;
+        let mut flashing = false;
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let mut cards = Vec::new();
             for (i, server) in self.servers.iter().enumerate() {
@@ -728,6 +731,21 @@ Click to switch on or off.",
                     .interact(Sense::click_and_drag())
                     .on_hover_text(server.cfg.address());
                 cards.push(response.rect);
+                // A critical problem that just arrived: a red frame that slowly fades away.
+                let hit = self.env.notifier.critical_hit(&server.cfg.id);
+                if let Some(age) = hit.filter(|age| *age < CRITICAL_FLASH) {
+                    let strength = 1.0 - age.as_secs_f32() / CRITICAL_FLASH.as_secs_f32();
+                    let radius = CornerRadius::same(5);
+                    ui.painter()
+                        .rect_filled(response.rect, radius, w::CRITICAL.gamma_multiply(0.12 * strength));
+                    ui.painter().rect_stroke(
+                        response.rect,
+                        radius,
+                        egui::Stroke::new(1.0 + 2.5 * strength, w::CRITICAL.gamma_multiply(strength)),
+                        egui::StrokeKind::Inside,
+                    );
+                    flashing = true;
+                }
                 if response.clicked() {
                     clicked = Some(i);
                 }
@@ -755,6 +773,10 @@ Click to switch on or off.",
         });
         if !ui.input(|i| i.pointer.any_down()) {
             self.dragging = None;
+        }
+        if flashing {
+            // Keep drawing while a frame fades.
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
         if let Some(i) = clicked {
             self.selected = i;
