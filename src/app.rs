@@ -1827,14 +1827,22 @@ fn filesystems_card(ui: &mut Ui, s: &Sample) {
             });
         }
         let heads = ["Mount", "Type", "Used", "", "Size"];
-        w::table(ui, "filesystems", &heads, &[0, 1], rows.len(), |i, c| {
-            let d = rows[i];
-            c.text(d.mount.as_str());
-            c.text(w::muted(&d.fstype));
-            c.cell(|ui| w::meter(ui, d.pct() / 100.0, 260.0));
-            c.text(format!("{:.0}%", d.pct()));
-            c.text(w::muted(format!("{} of {}", fmt_bytes(d.used), fmt_bytes(d.total))));
-        });
+        w::table(
+            ui,
+            "filesystems",
+            &heads,
+            &[0, 1],
+            rows.len(),
+            |i| rows[i].mount.clone(),
+            |i, c| {
+                let d = rows[i];
+                c.text(d.mount.as_str());
+                c.text(w::muted(&d.fstype));
+                c.cell(|ui| w::meter(ui, d.pct() / 100.0, 260.0));
+                c.text(format!("{:.0}%", d.pct()));
+                c.text(w::muted(format!("{} of {}", fmt_bytes(d.used), fmt_bytes(d.total))));
+            },
+        );
         if s.swap_total > 0 {
             ui.label(w::muted(format!(
                 "Swap: {} of {} used",
@@ -2130,17 +2138,25 @@ fn memory_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
             });
         }
         let heads = ["PID", "User", "Memory", "", "Share", "Command"];
-        w::table(ui, "mem-procs", &heads, &[1, 5], procs.len(), |i, c| {
-            let p = procs[i];
-            c.text(RichText::new(p.pid.to_string()).monospace());
-            c.text(p.user.as_str());
-            c.text(fmt_bytes(p.rss));
-            c.cell(|ui| w::bar(ui, p.rss as f32 / largest as f32, 140.0, w::SERIES[0]));
-            c.text(format!("{:.1}%", p.mem_pct));
-            c.cell(|ui| {
-                ui.label(RichText::new(&p.cmd).monospace()).on_hover_text(&p.cmd);
-            });
-        });
+        w::table(
+            ui,
+            "mem-procs",
+            &heads,
+            &[1, 5],
+            procs.len(),
+            |i| procs[i].pid.to_string(),
+            |i, c| {
+                let p = procs[i];
+                c.text(RichText::new(p.pid.to_string()).monospace());
+                c.text(p.user.as_str());
+                c.text(fmt_bytes(p.rss));
+                c.cell(|ui| w::bar(ui, p.rss as f32 / largest as f32, 140.0, w::SERIES[0]));
+                c.text(format!("{:.1}%", p.mem_pct));
+                c.cell(|ui| {
+                    ui.label(RichText::new(&p.cmd).monospace()).on_hover_text(&p.cmd);
+                });
+            },
+        );
     });
 
     if !s.mem_detail.is_empty() {
@@ -2156,6 +2172,7 @@ fn memory_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
                 &["Kind", "Size", "", "Of all memory"],
                 &[0],
                 rows.len(),
+                |i| rows[i].0.clone(),
                 |i, c| {
                     let (kind, bytes) = rows[i];
                     c.text(kind.as_str());
@@ -2229,13 +2246,21 @@ fn hardware_tab(ui: &mut Ui, state: &ServerState) {
                 rows.sort_by(|a, b| w::directed(value(a, column).cmp(&value(b, column)), descending));
             }
             let text: Vec<usize> = (0..heads.len()).collect();
-            w::table(ui, &id, &heads, &text, rows.len(), |i, c| {
-                c.text(RichText::new(&rows[i].name).strong());
-                for column in 1..heads.len() {
-                    let text = value(rows[i], column);
-                    c.text(if text.is_empty() { "–".to_string() } else { text });
-                }
-            });
+            w::table(
+                ui,
+                &id,
+                &heads,
+                &text,
+                rows.len(),
+                |i| format!("{}|{:?}", rows[i].name, rows[i].props.first()),
+                |i, c| {
+                    c.text(RichText::new(&rows[i].name).strong());
+                    for column in 1..heads.len() {
+                        let text = value(rows[i], column);
+                        c.text(if text.is_empty() { "–".to_string() } else { text });
+                    }
+                },
+            );
         });
     }
 }
@@ -2286,20 +2311,17 @@ fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String, allow_kill: bool)
                 w::directed(order, descending)
             });
         }
-        // The column without a title holds the button that ends a process, if that is allowed.
-        let heads = ["PID", "User", "CPU", "", "Memory", "RSS", "Running", "", "Command"];
-        w::table(ui, "procs", &heads, &[1, 8], procs.len().min(80), |i, c| {
-            let p = procs[i];
-            c.text(RichText::new(p.pid.to_string()).monospace());
-            c.text(p.user.as_str());
-            c.text(format!("{:.1}%", p.cpu));
-            c.cell(|ui| w::bar(ui, p.cpu / 100.0, 90.0, w::SERIES[0]));
-            c.text(format!("{:.1}%", p.mem_pct));
-            c.text(fmt_bytes(p.rss));
-            c.text(w::muted(fmt_duration(p.elapsed)));
-            c.cell(|ui| {
+        if allow_kill {
+            // Acts on the row that is selected in the table below.
+            let selected =
+                w::selected_row(ui, "procs").and_then(|pid| s.procs.iter().find(|p| p.pid.to_string() == pid));
+            ui.horizontal(|ui| {
                 // A zombie is already dead; only its parent can remove it.
-                if allow_kill && p.state != 'Z' && ui.small_button("End").on_hover_text("End this process").clicked() {
+                let possible = selected.is_some_and(|p| p.state != 'Z');
+                let end = w::icon_button(ui, w::Icon::End, "End", possible)
+                    .on_hover_text("End the selected process")
+                    .on_disabled_hover_text("Select a process in the table first");
+                if let (true, Some(p)) = (end.clicked(), selected) {
                     let name: String = p.cmd.split_whitespace().next().unwrap_or("").chars().take(40).collect();
                     request = Some(Command::Kill {
                         pid: p.pid,
@@ -2307,14 +2329,38 @@ fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String, allow_kill: bool)
                         name,
                     });
                 }
+                ui.label(w::muted(match selected {
+                    Some(p) => format!("{} · {}", p.pid, p.cmd.chars().take(70).collect::<String>()),
+                    None => "click a row to select a process".to_string(),
+                }));
             });
-            c.cell(|ui| {
-                // Cut off at the edge of the window; the tooltip has the whole command.
-                let color = if p.state == 'Z' { w::MUTED } else { w::TEXT };
-                ui.label(RichText::new(&p.cmd).monospace().color(color))
-                    .on_hover_text(&p.cmd);
-            });
-        });
+            ui.add_space(2.0);
+        }
+        let heads = ["PID", "User", "CPU", "", "Memory", "RSS", "Running", "Command"];
+        w::table(
+            ui,
+            "procs",
+            &heads,
+            &[1, 7],
+            procs.len().min(80),
+            |i| procs[i].pid.to_string(),
+            |i, c| {
+                let p = procs[i];
+                c.text(RichText::new(p.pid.to_string()).monospace());
+                c.text(p.user.as_str());
+                c.text(format!("{:.1}%", p.cpu));
+                c.cell(|ui| w::bar(ui, p.cpu / 100.0, 90.0, w::SERIES[0]));
+                c.text(format!("{:.1}%", p.mem_pct));
+                c.text(fmt_bytes(p.rss));
+                c.text(w::muted(fmt_duration(p.elapsed)));
+                c.cell(|ui| {
+                    // Cut off at the edge of the window; the tooltip has the whole command.
+                    let color = if p.state == 'Z' { w::MUTED } else { w::TEXT };
+                    ui.label(RichText::new(&p.cmd).monospace().color(color))
+                        .on_hover_text(&p.cmd);
+                });
+            },
+        );
         if procs.is_empty() {
             ui.label(w::muted("No process matches the filter."));
         }
@@ -2454,21 +2500,29 @@ fn network_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) 
             "Total sent",
             "Kind",
         ];
-        w::table(ui, "interfaces", &heads, &[0], rows.len(), |i, c| {
-            let n = rows[i];
-            c.text(RichText::new(&n.name).strong());
-            c.text(fmt_rate(n.rx_bps));
-            c.cell(|ui| w::bar(ui, (n.rx_bps / top) as f32, 110.0, w::SERIES[0]));
-            c.text(fmt_rate(n.tx_bps));
-            c.cell(|ui| w::bar(ui, (n.tx_bps / top) as f32, 110.0, w::SERIES[1]));
-            c.text(fmt_bytes(n.rx_total));
-            c.text(fmt_bytes(n.tx_total));
-            c.text(w::muted(if n.physical {
-                "port"
-            } else {
-                "virtual, not in the totals"
-            }));
-        });
+        w::table(
+            ui,
+            "interfaces",
+            &heads,
+            &[0],
+            rows.len(),
+            |i| rows[i].name.clone(),
+            |i, c| {
+                let n = rows[i];
+                c.text(RichText::new(&n.name).strong());
+                c.text(fmt_rate(n.rx_bps));
+                c.cell(|ui| w::bar(ui, (n.rx_bps / top) as f32, 110.0, w::SERIES[0]));
+                c.text(fmt_rate(n.tx_bps));
+                c.cell(|ui| w::bar(ui, (n.tx_bps / top) as f32, 110.0, w::SERIES[1]));
+                c.text(fmt_bytes(n.rx_total));
+                c.text(fmt_bytes(n.tx_total));
+                c.text(w::muted(if n.physical {
+                    "port"
+                } else {
+                    "virtual, not in the totals"
+                }));
+            },
+        );
     });
 }
 
@@ -2589,26 +2643,34 @@ fn disks_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
                 w::directed(order, descending)
             });
         }
-        w::table(ui, "disk-io", heads, &[0], rows.len(), |i, c| {
-            let d = rows[i];
-            c.text(RichText::new(&d.name).strong());
-            c.text(fmt_bytes_rate(d.read_bps));
-            c.text(fmt_bytes_rate(d.write_bps));
-            if !detailed {
-                return;
-            }
-            c.text(format!("{:.0}", d.iops));
-            match d.util {
-                Some(util) => {
-                    c.text(format!("{util:.0}%"));
-                    c.cell(|ui| w::meter(ui, util / 100.0, 220.0));
+        w::table(
+            ui,
+            "disk-io",
+            heads,
+            &[0],
+            rows.len(),
+            |i| rows[i].name.clone(),
+            |i, c| {
+                let d = rows[i];
+                c.text(RichText::new(&d.name).strong());
+                c.text(fmt_bytes_rate(d.read_bps));
+                c.text(fmt_bytes_rate(d.write_bps));
+                if !detailed {
+                    return;
                 }
-                None => {
-                    c.text(w::muted("–"));
-                    c.text(w::muted("not reported by this system"));
+                c.text(format!("{:.0}", d.iops));
+                match d.util {
+                    Some(util) => {
+                        c.text(format!("{util:.0}%"));
+                        c.cell(|ui| w::meter(ui, util / 100.0, 220.0));
+                    }
+                    None => {
+                        c.text(w::muted("–"));
+                        c.text(w::muted("not reported by this system"));
+                    }
                 }
-            }
-        });
+            },
+        );
     });
     filesystems_card(ui, s);
 }
@@ -2706,18 +2768,26 @@ fn temps_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
             });
         }
         let heads = ["Chip", "Reading", "Kind", "Temperature", ""];
-        w::table(ui, "sensors", &heads, &[0, 1, 2], rows.len(), |i, c| {
-            let x = rows[i];
-            let (warm, hot) = x.limits();
-            c.text(RichText::new(&x.chip).strong());
-            c.text(if x.label.is_empty() { "–" } else { x.label.as_str() });
-            c.text(w::muted(x.kind().label()));
-            c.text(format!("{:.1} °C", x.temp));
-            match w::level(x.temp, warm, hot).filter(|_| x.kind() != SensorKind::Other) {
-                Some((color, label)) => c.cell(|ui| w::status(ui, color, label)),
-                None => c.text(""),
-            }
-        });
+        w::table(
+            ui,
+            "sensors",
+            &heads,
+            &[0, 1, 2],
+            rows.len(),
+            |i| format!("{}|{}", rows[i].chip, rows[i].label),
+            |i, c| {
+                let x = rows[i];
+                let (warm, hot) = x.limits();
+                c.text(RichText::new(&x.chip).strong());
+                c.text(if x.label.is_empty() { "–" } else { x.label.as_str() });
+                c.text(w::muted(x.kind().label()));
+                c.text(format!("{:.1} °C", x.temp));
+                match w::level(x.temp, warm, hot).filter(|_| x.kind() != SensorKind::Other) {
+                    Some((color, label)) => c.cell(|ui| w::status(ui, color, label)),
+                    None => c.text(""),
+                }
+            },
+        );
         let sata = s.disk_io.iter().any(|d| d.name.starts_with("sd"));
         if sata && !s.info.is_mac && !s.sensors.iter().any(|x| x.chip.starts_with("drivetemp")) {
             ui.add_space(4.0);
@@ -2843,20 +2913,28 @@ fn gpu_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64)) {
             });
         }
         let heads = ["#", "Name", "Load", "", "Memory", "Temperature", "Power"];
-        w::table(ui, "gpus", &heads, &[0, 1], rows.len(), |row, c| {
-            let (i, g) = rows[row];
-            c.text(i.to_string());
-            c.text(RichText::new(&g.name).strong());
-            c.text(format!("{:.0}%", g.util));
-            c.cell(|ui| w::bar(ui, g.util / 100.0, 160.0, w::SERIES[i % w::SERIES.len()]));
-            c.text(if g.mem_total > 0 {
-                format!("{} of {}", fmt_bytes(g.mem_used), fmt_bytes(g.mem_total))
-            } else {
-                format!("{} (shared)", fmt_bytes(g.mem_used))
-            });
-            c.text(g.temp.map(|t| format!("{t:.0} °C")).unwrap_or("–".into()));
-            c.text(g.power.map(|p| format!("{p:.1} W")).unwrap_or("–".into()));
-        });
+        w::table(
+            ui,
+            "gpus",
+            &heads,
+            &[0, 1],
+            rows.len(),
+            |row| rows[row].0.to_string(),
+            |row, c| {
+                let (i, g) = rows[row];
+                c.text(i.to_string());
+                c.text(RichText::new(&g.name).strong());
+                c.text(format!("{:.0}%", g.util));
+                c.cell(|ui| w::bar(ui, g.util / 100.0, 160.0, w::SERIES[i % w::SERIES.len()]));
+                c.text(if g.mem_total > 0 {
+                    format!("{} of {}", fmt_bytes(g.mem_used), fmt_bytes(g.mem_total))
+                } else {
+                    format!("{} (shared)", fmt_bytes(g.mem_used))
+                });
+                c.text(g.temp.map(|t| format!("{t:.0} °C")).unwrap_or("–".into()));
+                c.text(g.power.map(|p| format!("{p:.1} W")).unwrap_or("–".into()));
+            },
+        );
     });
 }
 
@@ -3014,83 +3092,102 @@ fn docker_tab(
     });
     let mut request = None;
     w::card(ui, |ui| {
+        if allow_actions {
+            // Act on the row that is selected in the table below.
+            let selected = w::selected_row(ui, "containers").and_then(|name| list.iter().find(|c| c.name == name));
+            let up = selected.is_some_and(|c| matches!(c.state.as_str(), "running" | "restarting" | "paused"));
+            ui.horizontal(|ui| {
+                for (action, icon, possible) in [
+                    (ContainerAction::Start, w::Icon::Play, selected.is_some() && !up),
+                    (ContainerAction::Stop, w::Icon::Stop, up),
+                    (ContainerAction::Restart, w::Icon::Restart, up),
+                ] {
+                    let button = w::icon_button(ui, icon, action.label(), possible)
+                        .on_hover_text(format!("{} the selected container", action.label()))
+                        .on_disabled_hover_text(if selected.is_none() {
+                            "Select a container in the table first"
+                        } else if up {
+                            "The selected container is running already"
+                        } else {
+                            "The selected container is not running"
+                        });
+                    if let (true, Some(container)) = (button.clicked(), selected) {
+                        request = Some(Command::Container {
+                            action,
+                            name: container.name.clone(),
+                        });
+                    }
+                }
+                ui.label(w::muted(match selected {
+                    Some(container) => container.name.clone(),
+                    None => "click a row to select a container".to_string(),
+                }));
+            });
+            ui.add_space(2.0);
+        }
         ScrollArea::horizontal().show(ui, |ui| {
-            request = container_table(ui, &rows, s, allow_actions);
+            container_table(ui, &rows, s);
         });
     });
     request
 }
 
-fn container_table(ui: &mut Ui, rows: &[&Container], s: &Sample, allow_actions: bool) -> Option<Command> {
-    let mut request = None;
+fn container_table(ui: &mut Ui, rows: &[&Container], s: &Sample) {
     let mut rows = rows.to_vec();
     if let Some((column, descending)) = w::sort_choice(ui, "containers") {
         rows.sort_by(|a, b| {
             let order = match column {
                 0 => container_status(a).1.cmp(container_status(b).1),
                 1 => a.name.cmp(&b.name),
-                3 => a.image.cmp(&b.image),
-                4 => a.cpu.total_cmp(&b.cpu),
-                5 | 6 => a.mem_used.cmp(&b.mem_used),
-                7 => a.net.cmp(&b.net),
-                8 => a.pids.cmp(&b.pids),
+                2 => a.image.cmp(&b.image),
+                3 => a.cpu.total_cmp(&b.cpu),
+                4 | 5 => a.mem_used.cmp(&b.mem_used),
+                6 => a.net.cmp(&b.net),
+                7 => a.pids.cmp(&b.pids),
                 _ => a.status.cmp(&b.status),
             };
             w::directed(order, descending)
         });
     }
-    // The first column without a title holds the start, stop and restart buttons.
     let heads = [
-        "State", "Name", "", "Image", "CPU", "Memory", "", "Net I/O", "PIDs", "Status",
+        "State", "Name", "Image", "CPU", "Memory", "", "Net I/O", "PIDs", "Status",
     ];
-    w::table(ui, "containers", &heads, &[0, 1, 3, 7, 9], rows.len(), |i, c| {
-        let container = rows[i];
-        let (color, label) = container_status(container);
-        c.cell(|ui| w::status(ui, color, label));
-        c.text(RichText::new(&container.name).strong());
-        c.cell(|ui| {
-            if !allow_actions {
-                return;
-            }
-            let up = matches!(container.state.as_str(), "running" | "restarting" | "paused");
-            let offered: &[ContainerAction] = if up {
-                &[ContainerAction::Stop, ContainerAction::Restart]
+    w::table(
+        ui,
+        "containers",
+        &heads,
+        &[0, 1, 2, 6, 8],
+        rows.len(),
+        |i| rows[i].name.clone(),
+        |i, c| {
+            let container = rows[i];
+            let (color, label) = container_status(container);
+            c.cell(|ui| w::status(ui, color, label));
+            c.text(RichText::new(&container.name).strong());
+            c.cell(|ui| {
+                let image: String = container.image.chars().take(36).collect();
+                ui.label(w::muted(image)).on_hover_text(&container.image);
+            });
+            if container.has_stats {
+                c.text(format!("{:.1}%", container.cpu));
+                let limit = container.mem_limit;
+                if limit > 0 && limit < s.mem_total.saturating_sub(s.mem_total / 20) {
+                    c.text(format!("{} / {}", fmt_bytes(container.mem_used), fmt_bytes(limit)));
+                    c.cell(|ui| w::meter(ui, container.mem_used as f32 / limit as f32, 80.0));
+                } else {
+                    c.text(fmt_bytes(container.mem_used));
+                    c.text(w::muted("no limit"));
+                }
+                c.text(w::muted(&container.net));
+                c.text(container.pids.to_string());
             } else {
-                &[ContainerAction::Start]
-            };
-            for action in offered {
-                if ui.small_button(action.label()).clicked() {
-                    request = Some(Command::Container {
-                        action: *action,
-                        name: container.name.clone(),
-                    });
+                for _ in 0..5 {
+                    c.text(w::muted("–"));
                 }
             }
-        });
-        c.cell(|ui| {
-            let image: String = container.image.chars().take(36).collect();
-            ui.label(w::muted(image)).on_hover_text(&container.image);
-        });
-        if container.has_stats {
-            c.text(format!("{:.1}%", container.cpu));
-            let limit = container.mem_limit;
-            if limit > 0 && limit < s.mem_total.saturating_sub(s.mem_total / 20) {
-                c.text(format!("{} / {}", fmt_bytes(container.mem_used), fmt_bytes(limit)));
-                c.cell(|ui| w::meter(ui, container.mem_used as f32 / limit as f32, 80.0));
-            } else {
-                c.text(fmt_bytes(container.mem_used));
-                c.text(w::muted("no limit"));
-            }
-            c.text(w::muted(&container.net));
-            c.text(container.pids.to_string());
-        } else {
-            for _ in 0..5 {
-                c.text(w::muted("–"));
-            }
-        }
-        c.text(w::muted(&container.status));
-    });
-    request
+            c.text(w::muted(&container.status));
+        },
+    );
 }
 
 fn suggestions_tab(ui: &mut Ui, suggestions: &[Suggestion]) {

@@ -114,6 +114,8 @@ impl Cells<'_, '_, '_> {
         self.row.col(|ui| {
             // Never wrap: a narrow column cuts its content off instead of growing taller.
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            // Text that could be marked with the mouse would swallow the click that selects the row.
+            ui.style_mut().interaction.selectable_labels = false;
             add(ui);
         });
     }
@@ -125,25 +127,40 @@ impl Cells<'_, '_, '_> {
     }
 }
 
+fn selection_key(table: &str) -> egui::Id {
+    egui::Id::unique(("selected", table))
+}
+
+/// The row the user selected in a [`table`], as the key that table gave it.
+pub fn selected_row(ui: &Ui, table: &str) -> Option<String> {
+    ui.data(|d| d.get_temp(selection_key(table)))
+}
+
 /// A striped table. Columns are as wide as their content until the user drags a column
 /// border; a click on a title sorts (see [`sort_choice`]). `text` lists the columns that
-/// hold text rather than numbers. `add_row` is called with the index of each row.
+/// hold text rather than numbers. A click on a row selects it, another click lets it go
+/// (see [`selected_row`]); `key` names a row so the selection follows it when the order
+/// changes. `add_row` is called with the index of each row.
 pub fn table(
     ui: &mut Ui,
     id: &str,
     heads: &[&str],
     text: &[usize],
     rows: usize,
+    key: impl Fn(usize) -> String,
     mut add_row: impl FnMut(usize, &mut Cells),
 ) {
     use egui_extras::{Column, TableBuilder};
     let before = sort_choice(ui, id);
     let mut chosen = before;
+    let selected_before = selected_row(ui, id);
+    let mut selected = selected_before.clone();
     let mut builder = TableBuilder::new(ui)
         .id_salt(id)
         .striped(true)
         .resizable(true)
         .vscroll(false)
+        .sense(Sense::click())
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
     for column in 0..heads.len() {
         // The last column takes the rest of the width.
@@ -162,7 +179,16 @@ pub fn table(
         .body(|body| {
             body.rows(26.0, rows, |mut row| {
                 let index = row.index();
+                let name = key(index);
+                row.set_selected(selected_before.as_deref() == Some(name.as_str()));
                 add_row(index, &mut Cells { row: &mut row });
+                if row.response().clicked() {
+                    selected = if selected.as_deref() == Some(name.as_str()) {
+                        None
+                    } else {
+                        Some(name)
+                    };
+                }
             });
         });
     if chosen != before {
@@ -171,6 +197,15 @@ pub fn table(
                 d.insert_temp(sort_key(id), choice);
             }
             None => d.remove::<(usize, bool)>(sort_key(id)),
+        });
+        ui.ctx().request_repaint();
+    }
+    if selected != selected_before {
+        ui.data_mut(|d| match selected {
+            Some(name) => {
+                d.insert_temp(selection_key(id), name);
+            }
+            None => d.remove::<String>(selection_key(id)),
         });
         ui.ctx().request_repaint();
     }
@@ -265,10 +300,18 @@ pub enum Icon {
     Wallet,
     /// The cat in a circle, for the repository on GitHub.
     Github,
+    /// A triangle pointing right: start.
+    Play,
+    /// A square: stop.
+    Stop,
+    /// An arrow going round: restart.
+    Restart,
+    /// A cross: end a process.
+    End,
 }
 
 /// Paint `icon` around `c`; `scale` 1 fits a line of text.
-fn paint_icon(painter: &egui::Painter, icon: Icon, c: egui::Pos2, scale: f32) {
+fn paint_icon(painter: &egui::Painter, icon: Icon, c: egui::Pos2, scale: f32, tint: Color32) {
     let at = |x: f32, y: f32| egui::pos2(c.x + x * scale, c.y + y * scale);
     let radius = |r: f32| CornerRadius::same((r * scale).round() as u8);
     match icon {
@@ -297,6 +340,40 @@ fn paint_icon(painter: &egui::Painter, icon: Icon, c: egui::Pos2, scale: f32) {
             );
             painter.line_segment([at(-1.7, 4.4), at(-4.0, 3.3)], egui::Stroke::new(1.1 * scale, SURFACE));
         }
+        Icon::Play => {
+            let points = vec![at(-4.0, -5.0), at(-4.0, 5.0), at(5.0, 0.0)];
+            painter.add(egui::Shape::convex_polygon(points, tint, egui::Stroke::NONE));
+        }
+        Icon::Stop => {
+            painter.rect_filled(
+                egui::Rect::from_min_max(at(-4.5, -4.5), at(4.5, 4.5)),
+                radius(1.0),
+                tint,
+            );
+        }
+        Icon::Restart => {
+            // Most of a circle, clockwise, with an arrow head where it ends.
+            let on_circle = |degrees: f32| {
+                let angle = degrees.to_radians();
+                at(5.0 * angle.cos(), 5.0 * angle.sin())
+            };
+            let arc: Vec<egui::Pos2> = (0..=28).map(|step| on_circle(40.0 + step as f32 * 10.0)).collect();
+            painter.add(egui::Shape::line(arc, egui::Stroke::new(1.6 * scale, tint)));
+            let end = 320.0f32.to_radians();
+            let (radial, forward) = ((end.cos(), end.sin()), (-end.sin(), end.cos()));
+            let tip = at(5.0 * radial.0 + 3.6 * forward.0, 5.0 * radial.1 + 3.6 * forward.1);
+            let head = vec![
+                tip,
+                at(7.8 * radial.0, 7.8 * radial.1),
+                at(2.2 * radial.0, 2.2 * radial.1),
+            ];
+            painter.add(egui::Shape::convex_polygon(head, tint, egui::Stroke::NONE));
+        }
+        Icon::End => {
+            let stroke = egui::Stroke::new(2.0 * scale, tint);
+            painter.line_segment([at(-4.0, -4.0), at(4.0, 4.0)], stroke);
+            painter.line_segment([at(-4.0, 4.0), at(4.0, -4.0)], stroke);
+        }
         Icon::Wallet => {
             painter.rect_filled(
                 egui::Rect::from_min_max(at(-7.0, -5.0), at(7.0, 5.0)),
@@ -309,12 +386,27 @@ fn paint_icon(painter: &egui::Painter, icon: Icon, c: egui::Pos2, scale: f32) {
     }
 }
 
+/// A button with a small picture in front of its label; greyed out while `enabled` is false.
+pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool) -> egui::Response {
+    // The blanks reserve the place where the picture is painted.
+    let response = ui.add_enabled(enabled, egui::Button::new(format!("      {label}")));
+    let center = egui::pos2(response.rect.left() + 15.0, response.rect.center().y);
+    paint_icon(ui.painter(), icon, center, 1.0, if enabled { TEXT } else { MUTED });
+    response
+}
+
 /// A wide button with a large picture, a title and a line below it.
 pub fn big_icon_button(ui: &mut Ui, icon: Icon, title: &str, subtitle: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 76.0), Sense::click());
     let fill = if response.hovered() { AXIS } else { GRID };
     ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
-    paint_icon(ui.painter(), icon, egui::pos2(rect.left() + 42.0, rect.center().y), 3.2);
+    paint_icon(
+        ui.painter(),
+        icon,
+        egui::pos2(rect.left() + 42.0, rect.center().y),
+        3.2,
+        TEXT,
+    );
     let text = egui::pos2(rect.left() + 84.0, rect.center().y);
     ui.painter().text(
         egui::pos2(text.x, text.y - 9.0),
