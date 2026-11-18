@@ -4,6 +4,13 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.10.2
+
+- Rows can be selected in every table: a click marks a row, another click lets it go. The mark
+  follows the row when the table is sorted or refreshed.
+- Start, Stop and Restart for containers and End for processes moved out of the table into a bar
+  above it, with icons. They act on the selected row and are shown only when allowed in the settings.
+
 ## 0.10.1
 
 - **Container actions**: Start, Stop and Restart buttons for docker containers in the Docker tab.
