@@ -1439,6 +1439,10 @@ Click to switch on or off.",
 
     fn show_window(&mut self, ctx: &egui::Context, show: bool) {
         self.hidden = !show;
+        // On macOS the application is hidden as a whole, see `tray::set_app_hidden`.
+        #[cfg(target_os = "macos")]
+        tray::set_app_hidden(!show);
+        #[cfg(not(target_os = "macos"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(show));
         if show {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -1504,6 +1508,10 @@ Click to switch on or off.",
             return;
         }
 
+        // Brought back some other way (the Dock on a Mac): it is no longer hidden.
+        if self.hidden && ctx.input(|i| i.viewport().focused) == Some(true) {
+            self.hidden = false;
+        }
         let actions = self.tray.as_mut().map(|t| t.poll()).unwrap_or_default();
         for action in actions {
             match action {

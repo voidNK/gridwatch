@@ -24,6 +24,29 @@ pub enum Action {
     Quit,
 }
 
+/// Hide or show the whole application on macOS.
+///
+/// macOS draws no frames for a window that is not on screen, so nothing gridwatch does
+/// inside a frame could bring a hidden window back. Hiding the application instead keeps
+/// the window intact, and showing it again works straight from the click on the tray
+/// icon (and from the Dock, as for any Mac application). Must run on the main thread;
+/// elsewhere it does nothing.
+#[cfg(target_os = "macos")]
+pub fn set_app_hidden(hidden: bool) {
+    let Some(main_thread) = objc2::MainThreadMarker::new() else {
+        return;
+    };
+    let app = objc2_app_kit::NSApplication::sharedApplication(main_thread);
+    if hidden {
+        app.hide(None);
+    } else {
+        app.unhide(None);
+        // The newer `activate` does not exist before macOS 14.
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 mod native {
     use super::{Action, Level};
@@ -94,6 +117,9 @@ mod native {
                     ..
                 } = event
                 {
+                    // Frames only run again once the application is back on screen.
+                    #[cfg(target_os = "macos")]
+                    super::set_app_hidden(false);
                     let _ = clicks.send(Action::Toggle);
                     repaint.request_repaint();
                 }
@@ -106,6 +132,9 @@ mod native {
                     "quit" => Action::Quit,
                     _ => return,
                 };
+                // The action is carried out in the next frame, and macOS draws none while hidden.
+                #[cfg(target_os = "macos")]
+                super::set_app_hidden(false);
                 let _ = sender.send(action);
                 repaint.request_repaint();
             }));
