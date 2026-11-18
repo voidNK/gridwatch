@@ -4,6 +4,15 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.10.1
+
+- **Container actions**: Start, Stop and Restart buttons for docker containers in the Docker tab.
+- **End processes**: an End button per process in the Processes tab, with a choice between asking
+  the process to end and killing it.
+- Both are off until switched on in the settings (new section *Actions*). Stopping, restarting and
+  ending ask for confirmation first, and the result is reported at the top of the server page.
+- Fixed: `--screenshot` did not end the program when the tray icon was enabled.
+
 ## 0.10.0
 
 - When a critical problem newly hits a server, its entry in the server list gets a red frame that

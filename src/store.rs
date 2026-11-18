@@ -32,6 +32,12 @@ pub struct Config {
     /// Show an icon in the tray and keep running there when the window is closed.
     #[serde(default = "yes")]
     pub tray: bool,
+    /// Offer to start, stop and restart docker containers.
+    #[serde(default)]
+    pub allow_container_actions: bool,
+    /// Offer to end processes.
+    #[serde(default)]
+    pub allow_kill: bool,
 }
 
 fn yes() -> bool {
@@ -122,6 +128,8 @@ impl Default for Config {
             remember_secrets: true,
             check_updates: true,
             tray: true,
+            allow_container_actions: false,
+            allow_kill: false,
         }
     }
 }

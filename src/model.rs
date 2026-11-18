@@ -401,6 +401,12 @@ pub struct ServerState {
     pub container_history: HashMap<String, VecDeque<ContainerPoint>>,
     /// What is built into the machine; read once after connecting.
     pub hardware: Option<crate::hardware::Hardware>,
+    /// What the user asked to be done on this machine; the collector takes and runs them.
+    pub commands: Vec<crate::actions::Command>,
+    /// What became of the last command.
+    pub feedback: Option<crate::actions::Feedback>,
+    /// Ends the collector's wait between two polls, so a command runs at once.
+    pub wake: Arc<tokio::sync::Notify>,
 }
 
 impl ServerState {
