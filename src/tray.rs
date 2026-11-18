@@ -13,6 +13,8 @@ pub enum Level {
 }
 
 /// What the user asked for with a click on the icon or its menu.
+// Never made on systems without a tray.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Left click: show the window, or hide it if it is in front.
