@@ -1,5 +1,6 @@
 //! Background tasks: one per server, polling over SSH, on this computer, or generating demo data.
 
+use crate::actions::{self, Command, Feedback};
 use crate::model::*;
 use crate::notify::Notifier;
 use crate::parse::{self, RawSystem};
@@ -56,6 +57,11 @@ fn set_conn(shared: &Shared, env: &Env, conn: ConnState) {
 /// Run a program on this computer without a console window flashing up, feed it `input`
 /// and return what it prints.
 pub fn run_local(program: &str, args: &[&str], input: &str) -> Result<String> {
+    run_local_status(program, args, input).map(|(_, text)| text)
+}
+
+/// Like [`run_local`], and also tells whether the program reported success.
+pub fn run_local_status(program: &str, args: &[&str], input: &str) -> Result<(bool, String)> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut command = Command::new(program);
@@ -80,7 +86,25 @@ pub fn run_local(program: &str, args: &[&str], input: &str) -> Result<String> {
     if !out.status.success() {
         text.push_str(&String::from_utf8_lossy(&out.stderr));
     }
-    Ok(text)
+    Ok((out.status.success(), text))
+}
+
+/// Wait for the next poll, or less if the user asked for something in the meantime.
+async fn pause(env: &Env, shared: &Shared, started: Instant) {
+    let wake = shared.lock().unwrap().wake.clone();
+    tokio::select! {
+        _ = tokio::time::sleep(env.interval().saturating_sub(started.elapsed())) => {}
+        _ = wake.notified() => {}
+    }
+}
+
+fn take_commands(shared: &Shared) -> Vec<Command> {
+    std::mem::take(&mut shared.lock().unwrap().commands)
+}
+
+fn report(shared: &Shared, env: &Env, feedback: Feedback) {
+    shared.lock().unwrap().feedback = Some(feedback);
+    env.repaint.request_repaint();
 }
 
 /// Where the collection scripts run.
@@ -92,6 +116,23 @@ enum Source {
         program: &'static str,
         args: &'static [&'static str],
     },
+}
+
+/// Carry out what the user asked for on this machine, one command after the other.
+async fn run_commands(source: &Source, shared: &Shared, env: &Env) {
+    for command in take_commands(shared) {
+        let feedback = match command.script() {
+            Some(script) => match source.run(&script, Duration::from_secs(40)).await {
+                Ok(output) => {
+                    let (ok, message) = actions::outcome(&output);
+                    command.feedback(ok, &message)
+                }
+                Err(e) => command.feedback(false, &format!("{e:#}")),
+            },
+            None => command.feedback(false, "this name cannot be passed to a command safely"),
+        };
+        report(shared, env, feedback);
+    }
 }
 
 impl Source {
@@ -194,13 +235,30 @@ async fn local_loop(cfg: &ServerConfig, shared: &Shared, env: &Env) -> Result<()
     tokio::time::sleep(Duration::from_secs(1)).await;
     loop {
         let started = Instant::now();
+        for command in take_commands(shared) {
+            let feedback = match command.windows() {
+                Some((program, args)) => {
+                    let job = tokio::task::spawn_blocking(move || {
+                        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                        run_local_status(program, &args, "")
+                    });
+                    match job.await {
+                        Ok(Ok((ok, output))) => command.feedback(ok, &output),
+                        Ok(Err(e)) => command.feedback(false, &format!("{e:#}")),
+                        Err(e) => command.feedback(false, &e.to_string()),
+                    }
+                }
+                None => command.feedback(false, "this name cannot be passed to a command safely"),
+            };
+            report(shared, env, feedback);
+        }
         let reader = local.clone();
         let system = tokio::task::spawn_blocking(move || reader.lock().unwrap().sample(now_ts()));
         let docker = tokio::task::spawn_blocking(crate::local_windows::docker);
         let (sample, docker) = tokio::join!(system, docker);
         env.publish(&cfg.id, shared, sample?, docker?);
         env.alert(cfg, shared);
-        tokio::time::sleep(env.interval().saturating_sub(started.elapsed())).await;
+        pause(env, shared, started).await;
     }
 }
 
@@ -224,6 +282,7 @@ async fn poll_loop(source: &Source, cfg: &ServerConfig, shared: &Shared, env: &E
     let mut inventory_read = false;
     loop {
         let started = Instant::now();
+        run_commands(source, shared, env).await;
         let (system, docker) = tokio::join!(poll_system(source), poll_docker(source));
         let (raw, at) = system?;
         let dt = at.duration_since(prev_at).as_secs_f64();
@@ -239,7 +298,7 @@ async fn poll_loop(source: &Source, cfg: &ServerConfig, shared: &Shared, env: &E
                 env.repaint.request_repaint();
             }
         }
-        tokio::time::sleep(env.interval().saturating_sub(started.elapsed())).await;
+        pause(env, shared, started).await;
     }
 }
 
@@ -265,7 +324,11 @@ pub fn spawn_demo(
             let (sample, docker) = demo::generate(profile, now_ts());
             env.publish(&cfg.id, &shared, sample, docker);
             env.alert(&cfg, &shared);
-            tokio::time::sleep(env.interval()).await;
+            for command in take_commands(&shared) {
+                let feedback = command.feedback(false, "the demo servers are simulated, nothing was changed");
+                report(&shared, &env, feedback);
+            }
+            pause(&env, &shared, Instant::now()).await;
         }
     })
 }

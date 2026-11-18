@@ -1,5 +1,6 @@
 //! The window: server list on the left, tabs for the selected server on the right.
 
+use crate::actions::{Command, ContainerAction};
 use crate::collector::{self, Env};
 use crate::model::*;
 use crate::notify::Notifier;
@@ -129,6 +130,8 @@ pub struct App {
     /// Set when gridwatch was started a second time: come to the front instead.
     wake: Arc<AtomicBool>,
     confirm_remove: bool,
+    /// A command that waits for the user to say yes: the server it is for, and what.
+    confirm_action: Option<(usize, Command)>,
     secret_input: String,
     proc_filter: String,
     last_prune: Instant,
@@ -217,6 +220,7 @@ impl App {
             quitting: false,
             wake: Arc::default(),
             confirm_remove: false,
+            confirm_action: None,
             secret_input: String::new(),
             proc_filter: String::new(),
             last_prune: Instant::now(),
@@ -549,6 +553,8 @@ impl App {
             shots.delay = Duration::from_millis(300);
             if shots.index == shots.shots.len() {
                 self.screenshots = None;
+                // Really end: without this the window would be closed to the tray.
+                self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -586,6 +592,7 @@ impl eframe::App for App {
         self.settings_window(&ctx);
         self.update_window(&ctx);
         self.remove_window(&ctx);
+        self.action_window(&ctx);
     }
 }
 
@@ -808,6 +815,9 @@ Click to switch on or off.",
         let demo = self.is_demo();
         let builtin = self.servers[index].cfg.kind != ServerKind::Ssh;
         let remember = self.config.remember_secrets;
+        let allow_containers = self.config.allow_container_actions && !demo;
+        let allow_kill = self.config.allow_kill && !demo;
+        let mut request: Option<Command> = None;
         let mut hide = false;
         let mut edit = false;
         let mut reconnect = false;
@@ -844,6 +854,14 @@ Click to switch on or off.",
                 facts.push(format!("up {}", fmt_duration(s.uptime)));
             }
             ui.label(w::muted(facts.join("  ·  ")));
+            // What became of the last start, stop or kill, for a little while.
+            let recent = state
+                .feedback
+                .as_ref()
+                .filter(|f| f.at.elapsed() < Duration::from_secs(12));
+            if let Some(feedback) = recent {
+                w::status(ui, if feedback.ok { w::GOOD } else { w::CRITICAL }, &feedback.text);
+            }
             ui.add_space(4.0);
 
             match &state.conn {
@@ -935,18 +953,33 @@ Click to switch on or off.",
                         Tab::Cpu => cpu_tab(ui, &state, sample, range),
                         Tab::Cores => cores_tab(ui, &state, sample, range),
                         Tab::Memory => memory_tab(ui, &state, sample, range),
-                        Tab::Processes => processes_tab(ui, sample, filter),
+                        Tab::Processes => request = processes_tab(ui, sample, filter, allow_kill),
                         Tab::Network => network_tab(ui, &state, sample, range),
                         Tab::Disks => disks_tab(ui, &state, sample, range),
                         Tab::Temps => temps_tab(ui, &state, sample, range),
                         Tab::Gpu => gpu_tab(ui, &state, sample, range),
-                        Tab::Docker => docker_tab(ui, &state, sample, range, slots),
+                        Tab::Docker => request = docker_tab(ui, &state, sample, range, slots, allow_containers),
                         Tab::Hardware => hardware_tab(ui, &state),
                         Tab::Suggestions => suggestions_tab(ui, &suggestions),
                     });
             }
         }
 
+        if let Some(command) = request {
+            // Starting a container breaks nothing; everything else asks first.
+            let harmless = matches!(
+                command,
+                Command::Container {
+                    action: ContainerAction::Start,
+                    ..
+                }
+            );
+            if harmless {
+                self.send_command(index, command);
+            } else {
+                self.confirm_action = Some((index, command));
+            }
+        }
         if hide {
             self.selected = index;
             self.remove_selected();
@@ -1215,6 +1248,12 @@ Click to switch on or off.",
                                     }
                                 });
                             if self.paths.is_some() {
+                                ui.add_space(6.0);
+                                w::section(ui, "Actions", "off unless you allow them; stopping and ending ask first");
+                                ui.checkbox(&mut self.config.allow_container_actions, "Start, stop and restart docker containers")
+                                    .on_hover_text("Adds buttons to the Docker tab.\nThe user gridwatch logs in with must be allowed to run docker: member of the docker group, or root.");
+                                ui.checkbox(&mut self.config.allow_kill, "End processes")
+                                    .on_hover_text("Adds a button to the Processes tab.\nAn ordinary user can only end its own processes. For those of other users, gridwatch must log in as root.\nOn this computer the same goes for your own account.");
                                 ui.add_space(6.0);
                                 w::section(ui, "This computer", "");
                                 ui.checkbox(&mut self.config.show_local, "Show this computer in the server list");
@@ -1518,7 +1557,7 @@ Click to switch on or off.",
     /// The tray icon: follow the setting, react to clicks, show the state of the servers,
     /// and hide the window instead of ending the program when it is closed.
     fn drive_tray(&mut self, ctx: &egui::Context) {
-        let wanted = self.config.tray && !self.is_demo() && self.screenshots.is_none();
+        let wanted = self.config.tray && !self.is_demo() && self.screenshots.is_none() && !self.quitting;
         if wanted && self.tray.is_none() && !self.tray_failed {
             self.tray = Tray::new(ctx, self.config.notifications.enabled);
             self.tray_failed = self.tray.is_none();
@@ -1566,6 +1605,70 @@ Click to switch on or off.",
             if let Some(tray) = &mut self.tray {
                 tray.update(level, &text, alerts_on);
             }
+        }
+    }
+
+    /// Hand a command to the collector of a server and wake it.
+    fn send_command(&self, index: usize, command: Command) {
+        let Some(server) = self.servers.get(index) else { return };
+        let mut state = server.shared.lock().unwrap();
+        state.commands.push(command);
+        state.wake.notify_one();
+    }
+
+    /// The question before a container is stopped or a process is ended.
+    fn action_window(&mut self, ctx: &egui::Context) {
+        let Some((index, command)) = self.confirm_action.clone() else {
+            return;
+        };
+        let Some(server) = self.servers.get(index).map(|s| s.cfg.name.clone()) else {
+            self.confirm_action = None;
+            return;
+        };
+        let mut go: Option<Command> = None;
+        let mut cancel = false;
+        egui::Window::new("Please confirm")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(RichText::new(format!("{} on {server}?", command.describe())).strong());
+                match &command {
+                    Command::Kill { pid, name, .. } => {
+                        ui.label(w::muted(
+                            "End asks the process to stop and lets it tidy up. Kill stops it at once; unsaved work is lost.",
+                        ));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            for (label, force) in [("End process", false), ("Kill", true)] {
+                                if ui.button(label).clicked() {
+                                    go = Some(Command::Kill {
+                                        pid: *pid,
+                                        force,
+                                        name: name.clone(),
+                                    });
+                                }
+                            }
+                            cancel = ui.button("Cancel").clicked();
+                        });
+                    }
+                    Command::Container { action, .. } => {
+                        ui.label(w::muted("Whatever the container serves is unavailable until it runs again."));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(action.label()).clicked() {
+                                go = Some(command.clone());
+                            }
+                            cancel = ui.button("Cancel").clicked();
+                        });
+                    }
+                }
+            });
+        if let Some(command) = go {
+            self.send_command(index, command);
+            self.confirm_action = None;
+        } else if cancel || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.confirm_action = None;
         }
     }
 
@@ -2137,7 +2240,8 @@ fn hardware_tab(ui: &mut Ui, state: &ServerState) {
     }
 }
 
-fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String) {
+fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String, allow_kill: bool) -> Option<Command> {
+    let mut request = None;
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(filter)
@@ -2182,8 +2286,9 @@ fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String) {
                 w::directed(order, descending)
             });
         }
-        let heads = ["PID", "User", "CPU", "", "Memory", "RSS", "Running", "Command"];
-        w::table(ui, "procs", &heads, &[1, 7], procs.len().min(80), |i, c| {
+        // The column without a title holds the button that ends a process, if that is allowed.
+        let heads = ["PID", "User", "CPU", "", "Memory", "RSS", "Running", "", "Command"];
+        w::table(ui, "procs", &heads, &[1, 8], procs.len().min(80), |i, c| {
             let p = procs[i];
             c.text(RichText::new(p.pid.to_string()).monospace());
             c.text(p.user.as_str());
@@ -2192,6 +2297,17 @@ fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String) {
             c.text(format!("{:.1}%", p.mem_pct));
             c.text(fmt_bytes(p.rss));
             c.text(w::muted(fmt_duration(p.elapsed)));
+            c.cell(|ui| {
+                // A zombie is already dead; only its parent can remove it.
+                if allow_kill && p.state != 'Z' && ui.small_button("End").on_hover_text("End this process").clicked() {
+                    let name: String = p.cmd.split_whitespace().next().unwrap_or("").chars().take(40).collect();
+                    request = Some(Command::Kill {
+                        pid: p.pid,
+                        force: false,
+                        name,
+                    });
+                }
+            });
             c.cell(|ui| {
                 // Cut off at the edge of the window; the tooltip has the whole command.
                 let color = if p.state == 'Z' { w::MUTED } else { w::TEXT };
@@ -2203,6 +2319,7 @@ fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String) {
             ui.label(w::muted("No process matches the filter."));
         }
     });
+    request
 }
 
 const MIB: f64 = (1u64 << 20) as f64;
@@ -2755,7 +2872,14 @@ fn container_status(c: &Container) -> (Color32, &'static str) {
     }
 }
 
-fn docker_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64), slots: &mut Vec<String>) {
+fn docker_tab(
+    ui: &mut Ui,
+    state: &ServerState,
+    s: &Sample,
+    range: (i64, i64),
+    slots: &mut Vec<String>,
+    allow_actions: bool,
+) -> Option<Command> {
     let list = match &state.docker {
         DockerState::Ok(list) => list,
         other => {
@@ -2775,7 +2899,7 @@ fn docker_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64), s
                     ui.label(w::muted("Waiting for the first docker measurement…"));
                 }
             });
-            return;
+            return None;
         }
     };
 
@@ -2888,38 +3012,61 @@ fn docker_tab(ui: &mut Ui, state: &ServerState, s: &Sample, range: (i64, i64), s
             .then(b.cpu.total_cmp(&a.cpu))
             .then(a.name.cmp(&b.name))
     });
+    let mut request = None;
     w::card(ui, |ui| {
         ScrollArea::horizontal().show(ui, |ui| {
-            container_table(ui, &rows, s);
+            request = container_table(ui, &rows, s, allow_actions);
         });
     });
+    request
 }
 
-fn container_table(ui: &mut Ui, rows: &[&Container], s: &Sample) {
+fn container_table(ui: &mut Ui, rows: &[&Container], s: &Sample, allow_actions: bool) -> Option<Command> {
+    let mut request = None;
     let mut rows = rows.to_vec();
     if let Some((column, descending)) = w::sort_choice(ui, "containers") {
         rows.sort_by(|a, b| {
             let order = match column {
                 0 => container_status(a).1.cmp(container_status(b).1),
                 1 => a.name.cmp(&b.name),
-                2 => a.image.cmp(&b.image),
-                3 => a.cpu.total_cmp(&b.cpu),
-                4 | 5 => a.mem_used.cmp(&b.mem_used),
-                6 => a.net.cmp(&b.net),
-                7 => a.pids.cmp(&b.pids),
+                3 => a.image.cmp(&b.image),
+                4 => a.cpu.total_cmp(&b.cpu),
+                5 | 6 => a.mem_used.cmp(&b.mem_used),
+                7 => a.net.cmp(&b.net),
+                8 => a.pids.cmp(&b.pids),
                 _ => a.status.cmp(&b.status),
             };
             w::directed(order, descending)
         });
     }
+    // The first column without a title holds the start, stop and restart buttons.
     let heads = [
-        "State", "Name", "Image", "CPU", "Memory", "", "Net I/O", "PIDs", "Status",
+        "State", "Name", "", "Image", "CPU", "Memory", "", "Net I/O", "PIDs", "Status",
     ];
-    w::table(ui, "containers", &heads, &[0, 1, 2, 6, 8], rows.len(), |i, c| {
+    w::table(ui, "containers", &heads, &[0, 1, 3, 7, 9], rows.len(), |i, c| {
         let container = rows[i];
         let (color, label) = container_status(container);
         c.cell(|ui| w::status(ui, color, label));
         c.text(RichText::new(&container.name).strong());
+        c.cell(|ui| {
+            if !allow_actions {
+                return;
+            }
+            let up = matches!(container.state.as_str(), "running" | "restarting" | "paused");
+            let offered: &[ContainerAction] = if up {
+                &[ContainerAction::Stop, ContainerAction::Restart]
+            } else {
+                &[ContainerAction::Start]
+            };
+            for action in offered {
+                if ui.small_button(action.label()).clicked() {
+                    request = Some(Command::Container {
+                        action: *action,
+                        name: container.name.clone(),
+                    });
+                }
+            }
+        });
         c.cell(|ui| {
             let image: String = container.image.chars().take(36).collect();
             ui.label(w::muted(image)).on_hover_text(&container.image);
@@ -2943,6 +3090,7 @@ fn container_table(ui: &mut Ui, rows: &[&Container], s: &Sample) {
         }
         c.text(w::muted(&container.status));
     });
+    request
 }
 
 fn suggestions_tab(ui: &mut Ui, suggestions: &[Suggestion]) {

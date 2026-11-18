@@ -78,6 +78,8 @@ minimised. The **Alerts on / off** button in the top bar is the master switch. *
 | Remind me | repeat the alert every 5 to 60 minutes while problems stay open |
 | Refresh every, Keep history for | poll interval and how long history stays in the database |
 | Show this computer | list the computer gridwatch runs on |
+| Start, stop and restart docker containers | adds the buttons to the Docker tab; off by default. The login user must be allowed to run docker |
+| End processes | adds an End button to the Processes tab; off by default. An ordinary user can only end its own processes, others need a root login |
 | Keep running in the tray | closing the window hides it in the tray; *Quit* is in the menu of the tray icon |
 | Show its Linux (WSL) | Windows only: list the default WSL distribution. Watching it keeps WSL running |
 | Save passwords in the system keychain | see below |
@@ -242,6 +244,7 @@ cargo test real_release -- --ignored --nocapture                              # 
 | `src/suggest.rs` | suggestion rules |
 | `src/notify.rs` | alert sound and desktop notifications |
 | `src/tray.rs` | the tray icon |
+| `src/actions.rs` | start, stop and restart containers, end processes |
 | `src/instance.rs` | one running copy: a second start wakes the first |
 | `src/app.rs`, `src/widgets.rs` | the egui user interface |
 | `src/demo.rs` | simulated servers |
