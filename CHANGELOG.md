@@ -4,6 +4,12 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.9.3
+
+- Fixed: on macOS the keychain asked for permission once per server at every start (and again
+  after each update). All passwords now share one keychain item, so macOS asks once. Passwords
+  stored by older versions are moved over the first time they are read.
+
 ## 0.9.2
 
 - Fixed: on macOS a click on the tray icon did not bring the window back after it was closed,

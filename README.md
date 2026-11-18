@@ -153,6 +153,10 @@ KWallet) - and read from there at the next start. Switch it off and they are kep
 removed from the keychain, and asked for again after every restart. Removing a server removes its
 entry.
 
+macOS asks for permission when gridwatch reads its keychain item: once per start if you answer
+*Allow*, not at all after *Always Allow* - until the next update, because gridwatch is not signed
+by a registered developer and macOS then treats it as a new program.
+
 **Host keys** are checked against `~/.ssh/known_hosts` first. A host that is not known yet is
 trusted on first use and recorded in gridwatch's own `known_hosts` file. If a host key ever
 changes, gridwatch refuses to connect.
