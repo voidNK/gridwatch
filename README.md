@@ -31,6 +31,7 @@ reads `/proc` (or `sysctl` and `vm_stat` on a Mac), `df`, `ps` and the docker CL
 - **Suggestions** for saturated CPU, load above core count, I/O wait, CPU steal, memory and swap
   pressure, full or saturated disks, hot CPUs, disks and GPUs, zombie processes, pending reboots,
   containers that restart, fail, are unhealthy, run without or close to their memory limit, and more.
+- A **red frame** around a server in the list when a critical problem newly arrives, fading out slowly.
 - **Tray icon** on Windows and macOS - shows the worst state of all servers; closing the window
   keeps gridwatch running there, so alerts keep coming.
 - **Alerts** - a sound and a desktop notification (Windows, macOS, Linux) when a server gets into
