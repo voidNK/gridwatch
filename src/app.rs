@@ -2395,8 +2395,8 @@ fn processes_tab(ui: &mut Ui, s: &Sample, filter: &mut String, allow_kill: bool)
             ui.horizontal(|ui| {
                 // A zombie is already dead; only its parent can remove it.
                 let possible = selected.is_some_and(|p| p.state != 'Z');
-                let end = w::icon_button(ui, w::Icon::End, "End", possible)
-                    .on_hover_text("End the selected process")
+                let end = w::icon_button(ui, w::Icon::End, "Kill", possible)
+                    .on_hover_text("Kill the selected process")
                     .on_disabled_hover_text("Select a process in the table first");
                 if let (true, Some(p)) = (end.clicked(), selected) {
                     let name: String = p.cmd.split_whitespace().next().unwrap_or("").chars().take(40).collect();
