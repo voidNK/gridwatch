@@ -81,8 +81,13 @@ enum Job {
         summary: String,
         body: String,
         critical: bool,
+        /// The server it is about, handed to the click handler; none for the test notification.
+        server_id: Option<String>,
     },
 }
+
+/// Called with the id of the server when the user clicks a notification about it.
+type ClickHandler = std::sync::Arc<dyn Fn(Option<&str>) + Send + Sync>;
 
 pub struct Notifier {
     settings: Mutex<Notifications>,
@@ -91,11 +96,14 @@ pub struct Notifier {
     /// When each server last got a new critical problem, for the red frame in the server list.
     critical_hits: Mutex<HashMap<String, Instant>>,
     jobs: mpsc::Sender<Job>,
+    on_click: std::sync::Arc<Mutex<Option<ClickHandler>>>,
 }
 
 impl Notifier {
     pub fn new(settings: Notifications) -> Self {
         let (jobs, queue) = mpsc::channel();
+        let on_click: std::sync::Arc<Mutex<Option<ClickHandler>>> = Default::default();
+        let click_handler = on_click.clone();
         // Audio devices and notification services can block, so they get their own thread.
         std::thread::Builder::new()
             .name("notify".into())
@@ -107,7 +115,13 @@ impl Notifier {
                             summary,
                             body,
                             critical,
-                        } => show(&summary, &body, critical),
+                            server_id,
+                        } => {
+                            let handler = click_handler.lock().unwrap().clone();
+                            let clicked =
+                                handler.map(|handler| -> Clicked { Box::new(move || handler(server_id.as_deref())) });
+                            show(&summary, &body, critical, clicked)
+                        }
                     };
                     if let Err(e) = result {
                         eprintln!("gridwatch: notification failed: {e}");
@@ -121,7 +135,13 @@ impl Notifier {
             last_sound: Mutex::default(),
             critical_hits: Mutex::default(),
             jobs,
+            on_click,
         }
+    }
+
+    /// What to do when the user clicks a notification.
+    pub fn on_click(&self, handler: impl Fn(Option<&str>) + Send + Sync + 'static) {
+        *self.on_click.lock().unwrap() = Some(std::sync::Arc::new(handler));
     }
 
     pub fn set(&self, settings: Notifications) {
@@ -156,6 +176,7 @@ impl Notifier {
                 summary: summary(&settings, "gridwatch test", severity, false, 1),
                 body: line(&settings, &example),
                 critical: false,
+                server_id: None,
             });
         }
     }
@@ -207,6 +228,7 @@ impl Notifier {
                 summary: summary(&settings, server_name, severity, reminder, list.len()),
                 body: lines.join("\n"),
                 critical: severity == Severity::Critical,
+                server_id: Some(server_id.to_string()),
             });
         }
         if settings.sound {
@@ -334,9 +356,39 @@ fn play(kind: Tone, volume: f32) -> Result<(), String> {
     Ok(())
 }
 
+/// What to run when the notification is clicked.
+type Clicked = Box<dyn FnOnce() + Send>;
+
+/// Windows shows a notification under the name of the application it belongs to, which
+/// it looks up by an id. Without an installer nothing has registered one for gridwatch,
+/// and notifications appeared as "Windows PowerShell". A key in the user's part of the
+/// registry is all it takes; it is written the first time a notification is shown.
+#[cfg(windows)]
+fn windows_app_id() -> Option<&'static str> {
+    const ID: &str = "voidNK.gridwatch";
+    static REGISTERED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let register = || -> Result<(), String> {
+        let key = windows_registry::CURRENT_USER
+            .create(format!("Software\\Classes\\AppUserModelId\\{ID}"))
+            .map_err(|e| e.to_string())?;
+        key.set_string("DisplayName", "gridwatch").map_err(|e| e.to_string())?;
+        // The icon has to be a file; it goes next to the history.
+        if let Some(dirs) = directories::ProjectDirs::from("", "", "gridwatch") {
+            let icon = dirs.data_dir().join("icon.png");
+            let written = std::fs::create_dir_all(dirs.data_dir())
+                .and_then(|_| std::fs::write(&icon, include_bytes!("../packaging/icon.png")));
+            if written.is_ok() {
+                let _ = key.set_string("IconUri", icon.to_string_lossy());
+            }
+        }
+        Ok(())
+    };
+    REGISTERED.get_or_init(|| register().is_ok()).then_some(ID)
+}
+
 /// Desktop notification: toast on Windows, Notification Center on macOS, D-Bus on Linux.
 /// Always silent, the sound is ours and has its own switch.
-fn show(summary: &str, body: &str, critical: bool) -> Result<(), String> {
+fn show(summary: &str, body: &str, critical: bool, clicked: Option<Clicked>) -> Result<(), String> {
     // macOS shows notifications in the name of an installed application. Left alone, the
     // library looks one up by a name that does not exist, and macOS answers with a
     // "Choose Application" dialog. Naming Finder up front avoids the lookup.
@@ -357,7 +409,27 @@ fn show(summary: &str, body: &str, critical: bool) -> Result<(), String> {
     });
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     let _ = critical;
-    n.show().map(|_| ()).map_err(|e| e.to_string())
+    #[cfg(windows)]
+    if let Some(id) = windows_app_id() {
+        n.app_id(id);
+    }
+    let handle = n.show().map_err(|e| e.to_string())?;
+    // Windows tells the program that showed the notification what the user did with it.
+    // Waiting for that happens on a thread of its own, so the next alert is not held up.
+    #[cfg(windows)]
+    if let Some(clicked) = clicked {
+        std::thread::spawn(move || {
+            let _ = handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
+                use notify_rust::NotificationResponse::{Action, Default};
+                if matches!(response, Default | Action(_)) {
+                    clicked();
+                }
+            });
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = (handle, clicked);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -479,6 +551,7 @@ mod tests {
             &summary(&settings, "db-01", Severity::Critical, false, 1),
             &line(&settings, &example),
             false,
+            None,
         )
         .unwrap();
         for kind in [Tone::Bell, Tone::Sonar] {

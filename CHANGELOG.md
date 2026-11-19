@@ -4,6 +4,13 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.10.4
+
+- Fixed: on Windows, notifications appeared under the name "Windows PowerShell". They now carry
+  gridwatch's name and icon.
+- Windows: a click on a notification brings the gridwatch window to the front, on the server the
+  notification was about, with its suggestions open.
+
 ## 0.10.3
 
 - Fixed: gridwatch became sluggish and froze for many seconds with a large history. Changing the
