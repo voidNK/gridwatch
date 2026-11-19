@@ -4,7 +4,7 @@ use crate::model::*;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -177,6 +177,9 @@ impl Config {
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// A second connection that only reads. Loading a long range takes a while and must
+    /// not hold up the collectors, which write through `conn`. Not there for a database in memory.
+    reader: Option<Mutex<Connection>>,
 }
 
 const SCHEMA: &str = "
@@ -208,18 +211,25 @@ const ADDED_COLUMNS: [&str; 7] = [
 ];
 
 /// Number of points a chart gets at most; older data is averaged into buckets.
-const MAX_POINTS: i64 = 720;
+const MAX_POINTS: i64 = HISTORY_POINTS;
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        Self::init(conn)
+        let mut store = Self::init(conn)?;
+        let read_only = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+        store.reader = Connection::open_with_flags(path, read_only).ok().map(Mutex::new);
+        Ok(store)
     }
 
     pub fn in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
+    }
+
+    fn read(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.reader.as_ref().unwrap_or(&self.conn).lock().unwrap()
     }
 
     fn init(conn: Connection) -> Result<Self> {
@@ -235,7 +245,10 @@ impl Store {
                 conn.execute_batch(&format!("ALTER TABLE samples ADD COLUMN {column}"))?;
             }
         }
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+            reader: None,
+        })
     }
 
     pub fn insert(&self, server_id: &str, p: &HistPoint, docker: &DockerState) -> Result<()> {
@@ -282,97 +295,120 @@ impl Store {
         Ok(())
     }
 
-    /// History since `since`, averaged into at most `MAX_POINTS` buckets.
+    /// History since `since`, in at most `MAX_POINTS` points.
+    ///
+    /// The database does the averaging, one row per point comes back. The lists (cores,
+    /// sensors, GPUs, interfaces) are stored as text and cannot be averaged there; each
+    /// point takes them from its newest sample, which SQLite hands out for the columns
+    /// next to a single `MAX()`.
     pub fn load_history(&self, server_id: &str, since: i64, now: i64) -> Result<VecDeque<HistPoint>> {
         let bucket = ((now - since) / MAX_POINTS).max(1);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.read();
         let mut stmt = conn.prepare(
-            "SELECT ts, cpu, cpu_user, cpu_system, cpu_iowait, cpu_steal, load1, load5, load15,
-                    mem_used, mem_total, swap_used, rx_bps, tx_bps, temp, cores,
-                    disk_read, disk_write, disk_util, temps, gpus, nets, mem_cached
-             FROM samples WHERE server_id = ?1 AND ts >= ?2 ORDER BY ts",
+            "SELECT MAX(ts), AVG(cpu), AVG(cpu_user), AVG(cpu_system), AVG(cpu_iowait), AVG(cpu_steal),
+                    AVG(load1), AVG(load5), AVG(load15), AVG(mem_used), mem_total, AVG(swap_used),
+                    AVG(rx_bps), AVG(tx_bps), AVG(temp), cores,
+                    AVG(disk_read), AVG(disk_write), AVG(disk_util), temps, gpus, nets, AVG(mem_cached)
+             FROM samples WHERE server_id = ?1 AND ts >= ?2 GROUP BY ts / ?3 ORDER BY ts / ?3",
         )?;
-        let rows = stmt.query_map(params![server_id, since], |r| {
-            let cores: String = r.get(15)?;
+        let number = |r: &rusqlite::Row, i: usize| r.get::<_, Option<f64>>(i).map(|v| v.unwrap_or(0.0));
+        let rows = stmt.query_map(params![server_id, since, bucket], |r| {
             Ok(HistPoint {
                 ts: r.get(0)?,
                 cpu: CpuUsage {
-                    total: r.get(1)?,
-                    user: r.get(2)?,
-                    system: r.get(3)?,
-                    iowait: r.get(4)?,
-                    steal: r.get(5)?,
+                    total: number(r, 1)? as f32,
+                    user: number(r, 2)? as f32,
+                    system: number(r, 3)? as f32,
+                    iowait: number(r, 4)? as f32,
+                    steal: number(r, 5)? as f32,
                 },
-                load: [r.get(6)?, r.get(7)?, r.get(8)?],
-                mem_used: r.get::<_, i64>(9)? as u64,
-                mem_total: r.get::<_, i64>(10)? as u64,
-                swap_used: r.get::<_, i64>(11)? as u64,
-                rx_bps: r.get(12)?,
-                tx_bps: r.get(13)?,
-                temp: r.get(14)?,
-                cores: serde_json::from_str(&cores).unwrap_or_default(),
-                // Rows written by older versions have no values here.
-                disk_read_bps: r.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
-                disk_write_bps: r.get::<_, Option<f64>>(17)?.unwrap_or(0.0),
-                disk_util: r.get(18)?,
+                load: [number(r, 6)? as f32, number(r, 7)? as f32, number(r, 8)? as f32],
+                mem_used: number(r, 9)? as u64,
+                mem_total: r.get::<_, Option<i64>>(10)?.unwrap_or(0) as u64,
+                swap_used: number(r, 11)? as u64,
+                rx_bps: number(r, 12)?,
+                tx_bps: number(r, 13)?,
+                temp: r.get::<_, Option<f64>>(14)?.map(|t| t as f32),
+                cores: json(r.get(15)?),
+                // Rows written by older versions have no values in the columns from here on.
+                disk_read_bps: number(r, 16)?,
+                disk_write_bps: number(r, 17)?,
+                disk_util: r.get::<_, Option<f64>>(18)?.map(|u| u as f32),
                 temps: json(r.get(19)?),
                 gpus: json(r.get(20)?),
                 nets: json(r.get(21)?),
-                mem_cached: r.get::<_, Option<i64>>(22)?.unwrap_or(0) as u64,
+                mem_cached: number(r, 22)? as u64,
             })
         })?;
-
-        let mut out = VecDeque::new();
-        let mut group: Vec<HistPoint> = Vec::new();
-        for row in rows {
-            let p = row?;
-            if group.first().is_some_and(|g| g.ts / bucket != p.ts / bucket) {
-                out.push_back(average(&group));
-                group.clear();
-            }
-            group.push(p);
-        }
-        if !group.is_empty() {
-            out.push_back(average(&group));
-        }
-        Ok(out)
+        rows.collect::<rusqlite::Result<VecDeque<_>>>().map_err(Into::into)
     }
 
+    /// CPU and memory of every container at the given moments: the timestamps of the
+    /// points [`Store::load_history`] returned. One short lookup per point, where
+    /// averaging millions of container samples would take seconds.
     pub fn load_container_history(
         &self,
         server_id: &str,
-        since: i64,
-        now: i64,
+        moments: impl IntoIterator<Item = i64>,
     ) -> Result<HashMap<String, VecDeque<ContainerPoint>>> {
-        let bucket = ((now - since) / MAX_POINTS).max(1);
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT name, (ts / ?3) * ?3 AS b, AVG(cpu), AVG(mem_used)
-             FROM container_samples WHERE server_id = ?1 AND ts >= ?2
-             GROUP BY name, b ORDER BY b",
-        )?;
-        let rows = stmt.query_map(params![server_id, since, bucket], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, f32>(2)?,
-                r.get::<_, f64>(3)?,
-            ))
-        })?;
+        let conn = self.read();
+        let mut stmt =
+            conn.prepare("SELECT name, cpu, mem_used FROM container_samples WHERE server_id = ?1 AND ts = ?2")?;
         let mut out: HashMap<String, VecDeque<ContainerPoint>> = HashMap::new();
-        for row in rows {
-            let (name, ts, cpu, mem) = row?;
-            out.entry(name).or_default().push_back((ts, cpu, mem as u64));
+        for ts in moments {
+            let rows = stmt.query_map(params![server_id, ts], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f32>(1)?, r.get::<_, i64>(2)?))
+            })?;
+            for row in rows {
+                let (name, cpu, mem) = row?;
+                out.entry(name).or_default().push_back((ts, cpu, mem as u64));
+            }
         }
         Ok(out)
     }
 
+    /// The servers that have anything stored. Cheap: the primary key starts with the id.
+    fn server_ids(conn: &Connection) -> Result<Vec<String>> {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT server_id FROM samples UNION SELECT DISTINCT server_id FROM container_samples")?;
+        let ids = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
+    }
+
+    /// Delete what is older than the retention time. Done server by server, because the
+    /// tables are ordered by server and time; a plain `ts < ?` would read every row.
     pub fn prune(&self, retention_days: u32, now: i64) -> Result<()> {
         let cutoff = now - retention_days as i64 * 86400;
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM samples WHERE ts < ?1", params![cutoff])?;
-        conn.execute("DELETE FROM container_samples WHERE ts < ?1", params![cutoff])?;
+        for id in Self::server_ids(&conn)? {
+            conn.execute(
+                "DELETE FROM samples WHERE server_id = ?1 AND ts < ?2",
+                params![id, cutoff],
+            )?;
+            conn.execute(
+                "DELETE FROM container_samples WHERE server_id = ?1 AND ts < ?2",
+                params![id, cutoff],
+            )?;
+        }
         Ok(())
+    }
+
+    /// Delete the history of servers that are not in the list any more, and return how
+    /// many there were. They cannot be shown again, the data would only take up space.
+    pub fn forget_unknown(&self, known: &[String]) -> Result<usize> {
+        let unknown: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            Self::server_ids(&conn)?
+                .into_iter()
+                .filter(|id| !known.contains(id))
+                .collect()
+        };
+        for id in &unknown {
+            self.delete_server(id)?;
+        }
+        Ok(unknown.len())
     }
 
     pub fn delete_server(&self, server_id: &str) -> Result<()> {
@@ -385,84 +421,6 @@ impl Store {
 
 fn json<T: serde::de::DeserializeOwned + Default>(text: Option<String>) -> T {
     text.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
-}
-
-fn average(group: &[HistPoint]) -> HistPoint {
-    if group.len() == 1 {
-        return group[0].clone();
-    }
-    let n = group.len() as f32;
-    let mean = |f: &dyn Fn(&HistPoint) -> f32| group.iter().map(f).sum::<f32>() / n;
-    let mean64 = |f: &dyn Fn(&HistPoint) -> f64| group.iter().map(f).sum::<f64>() / n as f64;
-    let last = &group[group.len() - 1];
-    let temps: Vec<f32> = group.iter().filter_map(|p| p.temp).collect();
-    let utils: Vec<f32> = group.iter().filter_map(|p| p.disk_util).collect();
-    // Per chip and per GPU: sum and count, in order of first appearance.
-    let mut chips: Vec<(String, f32, u32)> = Vec::new();
-    let mut gpus: Vec<(f32, f64, u32)> = Vec::new();
-    let mut nets: Vec<(String, f64, f64, u32)> = Vec::new();
-    for p in group {
-        for (name, rx, tx) in &p.nets {
-            match nets.iter_mut().find(|n| n.0 == *name) {
-                Some(n) => (n.1, n.2, n.3) = (n.1 + rx, n.2 + tx, n.3 + 1),
-                None => nets.push((name.clone(), *rx, *tx, 1)),
-            }
-        }
-        for (chip, temp) in &p.temps {
-            match chips.iter_mut().find(|c| c.0 == *chip) {
-                Some(c) => (c.1, c.2) = (c.1 + temp, c.2 + 1),
-                None => chips.push((chip.clone(), *temp, 1)),
-            }
-        }
-        for (i, (util, mem)) in p.gpus.iter().enumerate() {
-            if gpus.len() <= i {
-                gpus.push((0.0, 0.0, 0));
-            }
-            gpus[i] = (gpus[i].0 + util, gpus[i].1 + *mem as f64, gpus[i].2 + 1);
-        }
-    }
-    let mut cores = BTreeMap::new();
-    for p in group {
-        for (i, v) in p.cores.iter().enumerate() {
-            let e = cores.entry(i).or_insert((0.0f32, 0u32));
-            e.0 += v;
-            e.1 += 1;
-        }
-    }
-    HistPoint {
-        ts: group[group.len() / 2].ts,
-        cpu: CpuUsage {
-            total: mean(&|p| p.cpu.total),
-            user: mean(&|p| p.cpu.user),
-            system: mean(&|p| p.cpu.system),
-            iowait: mean(&|p| p.cpu.iowait),
-            steal: mean(&|p| p.cpu.steal),
-        },
-        load: [mean(&|p| p.load[0]), mean(&|p| p.load[1]), mean(&|p| p.load[2])],
-        mem_used: mean64(&|p| p.mem_used as f64) as u64,
-        mem_cached: mean64(&|p| p.mem_cached as f64) as u64,
-        mem_total: last.mem_total,
-        swap_used: mean64(&|p| p.swap_used as f64) as u64,
-        rx_bps: mean64(&|p| p.rx_bps),
-        tx_bps: mean64(&|p| p.tx_bps),
-        temp: (!temps.is_empty()).then(|| temps.iter().sum::<f32>() / temps.len() as f32),
-        cores: cores.into_values().map(|(sum, count)| sum / count as f32).collect(),
-        disk_read_bps: mean64(&|p| p.disk_read_bps),
-        disk_write_bps: mean64(&|p| p.disk_write_bps),
-        disk_util: (!utils.is_empty()).then(|| utils.iter().sum::<f32>() / utils.len() as f32),
-        temps: chips
-            .into_iter()
-            .map(|(chip, sum, count)| (chip, sum / count as f32))
-            .collect(),
-        gpus: gpus
-            .into_iter()
-            .map(|(util, mem, count)| (util / count as f32, (mem / count as f64) as u64))
-            .collect(),
-        nets: nets
-            .into_iter()
-            .map(|(name, rx, tx, count)| (name, rx / count as f64, tx / count as f64))
-            .collect(),
-    }
 }
 
 #[cfg(test)]
@@ -546,18 +504,101 @@ mod tests {
         assert_eq!(h.len(), 5);
         assert_eq!(h[0].cpu.total, 0.5);
         assert_eq!((h[0].disk_read_bps, h[0].disk_util), (50.0, Some(0.5)));
-        assert_eq!(h[0].temps[0], ("k10temp".to_string(), 50.5));
-        assert_eq!(h[0].gpus, vec![(1.0, 1000)]);
-        assert_eq!(h[0].nets, vec![("eth0".to_string(), 0.5, 8.0)]);
+        // The lists of a point come from its newest sample.
+        assert_eq!(h[0].ts, 1001);
+        assert_eq!(h[0].cores, vec![1.0, 0.0]);
+        assert_eq!(h[0].temps[0], ("k10temp".to_string(), 51.0));
+        assert_eq!(h[0].gpus, vec![(2.0, 1000)]);
+        assert_eq!(h[0].nets, vec![("eth0".to_string(), 1.0, 8.0)]);
 
-        let c = store.load_container_history("a", 0, 1010).unwrap();
+        let c = store.load_container_history("a", 1000..1010).unwrap();
         assert_eq!(c["web"].len(), 10);
         assert_eq!(c["web"][0], (1000, 10.0, 4096));
 
         store.prune(1, 1005 + 86400).unwrap();
         assert_eq!(store.load_history("a", 0, 1010).unwrap().len(), 5);
-        store.delete_server("a").unwrap();
+        assert_eq!(store.forget_unknown(&["a".to_string(), "b".to_string()]).unwrap(), 0);
+        assert_eq!(store.forget_unknown(&["b".to_string()]).unwrap(), 1);
         assert!(store.load_history("a", 0, 1010).unwrap().is_empty());
         assert_eq!(store.load_history("b", 0, 1010).unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod timing {
+    use super::*;
+    use std::time::Instant;
+
+    /// Times the queries gridwatch runs against the real history database of this computer:
+    /// `cargo test real_database_timing -- --ignored --nocapture`. Reads only.
+    #[test]
+    #[ignore]
+    fn real_database_timing() {
+        let paths = Paths::resolve().unwrap();
+        let conn = Connection::open_with_flags(&paths.database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let count = |table: &str| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+        let started = Instant::now();
+        println!(
+            "samples: {} rows, container_samples: {} rows ({:?})",
+            count("samples"),
+            count("container_samples"),
+            started.elapsed()
+        );
+        for sql in [
+            "DELETE FROM samples WHERE ts < 1",
+            "DELETE FROM container_samples WHERE ts < 1",
+            "SELECT ts FROM samples WHERE server_id = 'x' AND ts >= 1 ORDER BY ts",
+            "SELECT name, (ts / 5) * 5 AS b, AVG(cpu), AVG(mem_used) FROM container_samples WHERE server_id = 'x' AND ts >= 1 GROUP BY name, b ORDER BY b",
+        ] {
+            let plan: Vec<String> = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .flatten()
+                .collect();
+            println!("plan for {:.60}: {}", sql, plan.join(" | "));
+        }
+        let servers: Vec<String> = conn
+            .prepare("SELECT DISTINCT server_id FROM samples")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        drop(conn);
+        let store = Store {
+            conn: Mutex::new(
+                Connection::open_with_flags(&paths.database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap(),
+            ),
+            reader: None,
+        };
+        let now = crate::now_ts();
+        for (label, secs) in [("1 h", 3600), ("24 h", 86400), ("7 d", 604800)] {
+            let started = Instant::now();
+            let mut points = 0;
+            for id in &servers {
+                points += store.load_history(id, now - secs, now).unwrap().len();
+            }
+            let history = started.elapsed();
+            let started = Instant::now();
+            for id in &servers {
+                let moments: Vec<i64> = store
+                    .load_history(id, now - secs, now)
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.ts)
+                    .collect();
+                store.load_container_history(id, moments).unwrap();
+            }
+            println!(
+                "range {label}: {} servers, {points} points, history {history:?}, containers {:?}",
+                servers.len(),
+                started.elapsed()
+            );
+        }
     }
 }
