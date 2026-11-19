@@ -84,8 +84,8 @@ minimised. The **Alerts on / off** button in the top bar is the master switch. *
 | Show its Linux (WSL) | Windows only: list the default WSL distribution. Watching it keeps WSL running |
 | Save passwords in the system keychain | see below |
 
-On Windows the notification is shown under the name of Windows PowerShell, because gridwatch
-has no installer that could register its own name. On macOS it appears under Finder for the same reason.
+On Windows a click on a notification brings gridwatch to the front, on the server it was about.
+On macOS notifications appear under Finder, because the app is not signed by a registered developer.
 
 ## Download
 

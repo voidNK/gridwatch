@@ -129,6 +129,8 @@ pub struct App {
     quitting: bool,
     /// Set when gridwatch was started a second time: come to the front instead.
     wake: Arc<AtomicBool>,
+    /// The server of the notification that was clicked: select it once the window is up.
+    clicked_server: Arc<Mutex<Option<String>>>,
     confirm_remove: bool,
     /// A command that waits for the user to say yes: the server it is for, and what.
     confirm_action: Option<(usize, Command)>,
@@ -227,6 +229,7 @@ impl App {
             hidden: false,
             quitting: false,
             wake: Arc::default(),
+            clicked_server: Arc::default(),
             confirm_remove: false,
             confirm_action: None,
             secret_input: String::new(),
@@ -267,6 +270,15 @@ impl App {
         if let (Some(paths), true) = (&app.paths, app.screenshots.is_none()) {
             let (wake, ctx) = (app.wake.clone(), cc.egui_ctx.clone());
             instance::listen(&paths.instance, move || {
+                wake.store(true, Ordering::SeqCst);
+                ctx.request_repaint();
+            });
+        }
+        {
+            // A click on a notification brings the window up, on the server it was about.
+            let (wake, clicked, ctx) = (app.wake.clone(), app.clicked_server.clone(), cc.egui_ctx.clone());
+            app.env.notifier.on_click(move |server_id| {
+                *clicked.lock().unwrap() = server_id.map(str::to_string);
                 wake.store(true, Ordering::SeqCst);
                 ctx.request_repaint();
             });
@@ -624,6 +636,11 @@ impl eframe::App for App {
         self.drive_tray(&ctx);
         if self.wake.swap(false, Ordering::SeqCst) {
             self.show_window(&ctx, true);
+            let clicked = self.clicked_server.lock().unwrap().take();
+            if let Some(index) = clicked.and_then(|id| self.servers.iter().position(|s| s.cfg.id == id)) {
+                self.selected = index;
+                self.tab = Tab::Suggestions;
+            }
         }
         if self.last_prune.elapsed() > Duration::from_secs(3600) {
             self.last_prune = Instant::now();
