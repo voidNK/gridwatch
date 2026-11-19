@@ -13,7 +13,7 @@ use crate::{Args, demo, instance, now_ts, secrets};
 use eframe::egui::{self, Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, ScrollArea, Sense, Ui};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -135,6 +135,10 @@ pub struct App {
     secret_input: String,
     proc_filter: String,
     last_prune: Instant,
+    /// Counts the requests to reload the history; a newer one makes an older one stop.
+    history_request: Arc<AtomicU64>,
+    /// How many reloads are running, for the note in the top bar.
+    history_jobs: Arc<AtomicUsize>,
     screenshots: Option<Screenshots>,
 }
 
@@ -170,7 +174,11 @@ impl App {
                 ..config.notifications.clone()
             }),
         });
-        let _ = env.store.prune(config.retention_days, now_ts());
+        // Tidying the history can take a moment on a large database; the window does not wait for it.
+        {
+            let (store, days) = (env.store.clone(), config.retention_days);
+            rt.spawn_blocking(move || store.prune(days, now_ts()));
+        }
 
         // In the demo each tab is shown on the server where it has the most to tell.
         let pick = |demo_server: usize| if args.demo { demo_server } else { 0 };
@@ -224,6 +232,8 @@ impl App {
             secret_input: String::new(),
             proc_filter: String::new(),
             last_prune: Instant::now(),
+            history_request: Arc::default(),
+            history_jobs: Arc::default(),
             screenshots,
             config,
         };
@@ -263,6 +273,11 @@ impl App {
         }
         if !app.is_demo() {
             app.apply_builtin();
+            // History of servers that were removed in an older version without their data.
+            let mut known: Vec<String> = app.servers.iter().map(|s| s.cfg.id.clone()).collect();
+            known.extend(["local".to_string(), "wsl".to_string()]);
+            let store = app.env.store.clone();
+            app.rt.spawn_blocking(move || store.forget_unknown(&known));
             if app.config.check_updates && app.screenshots.is_none() {
                 app.check_for_update();
             }
@@ -299,11 +314,8 @@ impl App {
         let now = now_ts();
         let since = now - RANGES[self.range].1;
         let history = self.env.store.load_history(id, since, now).unwrap_or_default();
-        let containers = self
-            .env
-            .store
-            .load_container_history(id, since, now)
-            .unwrap_or_default();
+        let moments = history.iter().map(|p| p.ts);
+        let containers = self.env.store.load_container_history(id, moments).unwrap_or_default();
         let mut state = shared.lock().unwrap();
         state.history = history;
         state.container_history = containers;
@@ -328,9 +340,53 @@ impl App {
     fn set_range(&mut self, range: usize) {
         self.range = range;
         self.env.keep_secs.store(RANGES[range].1, Ordering::Relaxed);
-        for s in &self.servers {
-            self.load_history(&s.cfg.id, &s.shared);
+        self.reload_history();
+    }
+
+    /// Read the history for the chosen range again, in the background: a week of samples
+    /// from many servers takes a while, and the window must stay usable meanwhile.
+    fn reload_history(&self) {
+        let span = RANGES[self.range].1;
+        let mut servers: Vec<(String, Shared)> = self
+            .servers
+            .iter()
+            .map(|s| (s.cfg.id.clone(), s.shared.clone()))
+            .collect();
+        // The server on screen first.
+        if self.selected < servers.len() {
+            servers.swap(0, self.selected);
         }
+        let (store, repaint) = (self.env.store.clone(), self.env.repaint.clone());
+        let (request, jobs) = (self.history_request.clone(), self.history_jobs.clone());
+        let mine = request.fetch_add(1, Ordering::SeqCst) + 1;
+        jobs.fetch_add(1, Ordering::SeqCst);
+        self.rt.spawn_blocking(move || {
+            for (id, shared) in servers {
+                // The range was changed again: that request reads everything anew.
+                if request.load(Ordering::SeqCst) != mine {
+                    break;
+                }
+                let now = now_ts();
+                let history = store.load_history(&id, now - span, now).unwrap_or_default();
+                let moments = history.iter().map(|p| p.ts);
+                let containers = store.load_container_history(&id, moments).unwrap_or_default();
+                if request.load(Ordering::SeqCst) != mine {
+                    break;
+                }
+                let mut state = shared.lock().unwrap();
+                state.history = history;
+                state.container_history = containers;
+                drop(state);
+                repaint.request_repaint();
+            }
+            jobs.fetch_sub(1, Ordering::SeqCst);
+            repaint.request_repaint();
+        });
+    }
+
+    fn prune_in_background(&self) {
+        let (store, days) = (self.env.store.clone(), self.config.retention_days);
+        self.rt.spawn_blocking(move || store.prune(days, now_ts()));
     }
 
     fn remove_selected(&mut self) {
@@ -571,7 +627,7 @@ impl eframe::App for App {
         }
         if self.last_prune.elapsed() > Duration::from_secs(3600) {
             self.last_prune = Instant::now();
-            let _ = self.env.store.prune(self.config.retention_days, now_ts());
+            self.prune_in_background();
         }
         // Keep the time axis moving even when no sample arrives.
         ctx.request_repaint_after(Duration::from_secs(1));
@@ -611,6 +667,10 @@ impl App {
             }
             if range != self.range {
                 self.set_range(range);
+            }
+            if self.history_jobs.load(Ordering::SeqCst) > 0 {
+                ui.spinner();
+                ui.label(w::muted("loading history"));
             }
             ui.add_space(18.0);
             ui.label(w::muted("Refresh"));
@@ -682,7 +742,7 @@ Click to switch on or off.",
             for (i, server) in self.servers.iter().enumerate() {
                 let state = server.shared.lock().unwrap();
                 let selected = i == self.selected;
-                let alerts = suggest::alert_count(&suggest::analyze(&state));
+                let alerts = suggest::alert_count(&state.findings);
                 let fill = if self.dragging == Some(i) {
                     w::GRID
                 } else if selected {
@@ -825,7 +885,7 @@ Click to switch on or off.",
         {
             let server = &mut self.servers[index];
             let state = server.shared.lock().unwrap();
-            let suggestions = suggest::analyze(&state);
+            let suggestions = &state.findings;
 
             // Header
             ui.horizontal(|ui| {
@@ -902,7 +962,7 @@ Click to switch on or off.",
             }
 
             if let Some(sample) = &state.latest {
-                let alerts = suggest::alert_count(&suggestions);
+                let alerts = suggest::alert_count(suggestions);
                 ui.horizontal(|ui| {
                     for (tab, label) in [
                         (Tab::Overview, "Overview".to_string()),
@@ -960,7 +1020,7 @@ Click to switch on or off.",
                         Tab::Gpu => gpu_tab(ui, &state, sample, range),
                         Tab::Docker => request = docker_tab(ui, &state, sample, range, slots, allow_containers),
                         Tab::Hardware => hardware_tab(ui, &state),
-                        Tab::Suggestions => suggestions_tab(ui, &suggestions),
+                        Tab::Suggestions => suggestions_tab(ui, suggestions),
                     });
             }
         }
@@ -1349,7 +1409,7 @@ Click to switch on or off.",
             self.env.interval.store(self.config.interval_secs, Ordering::Relaxed);
         }
         if self.config.retention_days < before.retention_days {
-            let _ = self.env.store.prune(self.config.retention_days, now_ts());
+            self.prune_in_background();
         }
         if self.config.remember_secrets != before.remember_secrets {
             // Switching it off also removes what was stored before.

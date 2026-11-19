@@ -348,7 +348,55 @@ pub struct HistPoint {
     pub nets: Vec<(String, f64, f64)>,
 }
 
+/// How many points a chart shows at most; a longer range puts several samples into one.
+pub const HISTORY_POINTS: i64 = 720;
+
 impl HistPoint {
+    /// Fold another sample into this point, which then stands for `count` samples:
+    /// numbers become the running mean, lists take the newest values.
+    pub fn merge(&mut self, new: &HistPoint, count: u32) {
+        let n = count.max(1) as f64;
+        let mean = |old: f64, new: f64| old + (new - old) / n;
+        let mean32 = |old: f32, new: f32| mean(old as f64, new as f64) as f32;
+        self.ts = new.ts;
+        self.cpu = CpuUsage {
+            total: mean32(self.cpu.total, new.cpu.total),
+            user: mean32(self.cpu.user, new.cpu.user),
+            system: mean32(self.cpu.system, new.cpu.system),
+            iowait: mean32(self.cpu.iowait, new.cpu.iowait),
+            steal: mean32(self.cpu.steal, new.cpu.steal),
+        };
+        for i in 0..3 {
+            self.load[i] = mean32(self.load[i], new.load[i]);
+        }
+        self.mem_used = mean(self.mem_used as f64, new.mem_used as f64) as u64;
+        self.mem_cached = mean(self.mem_cached as f64, new.mem_cached as f64) as u64;
+        self.mem_total = new.mem_total;
+        self.swap_used = mean(self.swap_used as f64, new.swap_used as f64) as u64;
+        self.rx_bps = mean(self.rx_bps, new.rx_bps);
+        self.tx_bps = mean(self.tx_bps, new.tx_bps);
+        self.disk_read_bps = mean(self.disk_read_bps, new.disk_read_bps);
+        self.disk_write_bps = mean(self.disk_write_bps, new.disk_write_bps);
+        self.temp = match (self.temp, new.temp) {
+            (Some(old), Some(new)) => Some(mean32(old, new)),
+            (old, new) => new.or(old),
+        };
+        self.disk_util = match (self.disk_util, new.disk_util) {
+            (Some(old), Some(new)) => Some(mean32(old, new)),
+            (old, new) => new.or(old),
+        };
+        if self.cores.len() == new.cores.len() {
+            for (old, new) in self.cores.iter_mut().zip(&new.cores) {
+                *old = mean32(*old, *new);
+            }
+        } else {
+            self.cores = new.cores.clone();
+        }
+        self.temps = new.temps.clone();
+        self.gpus = new.gpus.clone();
+        self.nets = new.nets.clone();
+    }
+
     pub fn from_sample(s: &Sample) -> Self {
         Self {
             ts: s.ts,
@@ -407,19 +455,40 @@ pub struct ServerState {
     pub feedback: Option<crate::actions::Feedback>,
     /// Ends the collector's wait between two polls, so a command runs at once.
     pub wake: Arc<tokio::sync::Notify>,
+    /// The suggestions for the latest sample, worked out once when it arrives.
+    pub findings: Vec<crate::suggest::Suggestion>,
+    /// How many samples the newest point of `history` stands for.
+    pub merged: u32,
 }
 
 impl ServerState {
-    /// Append a fresh sample and drop everything older than `keep_secs`.
+    /// Take in a fresh sample and drop everything older than `keep_secs`.
+    ///
+    /// A chart has room for about [`HISTORY_POINTS`] points. Over a long range several
+    /// samples therefore share one point, exactly as the stored history is read back,
+    /// so the amount of data per server stays the same however long gridwatch runs.
     pub fn push(&mut self, sample: Sample, docker: DockerState, keep_secs: i64) {
         let ts = sample.ts;
-        self.history.push_back(HistPoint::from_sample(&sample));
+        let bucket = (keep_secs / HISTORY_POINTS).max(1);
+        let point = HistPoint::from_sample(&sample);
+        match self.history.back_mut() {
+            Some(last) if bucket > 1 && last.ts / bucket == ts / bucket => {
+                self.merged += 1;
+                last.merge(&point, self.merged);
+            }
+            _ => {
+                self.merged = 1;
+                self.history.push_back(point);
+            }
+        }
         if let DockerState::Ok(list) = &docker {
             for c in list.iter().filter(|c| c.has_stats) {
-                self.container_history
-                    .entry(c.name.clone())
-                    .or_default()
-                    .push_back((ts, c.cpu, c.mem_used));
+                let series = self.container_history.entry(c.name.clone()).or_default();
+                match series.back_mut() {
+                    // The newest value stands for the point.
+                    Some(last) if bucket > 1 && last.0 / bucket == ts / bucket => *last = (ts, c.cpu, c.mem_used),
+                    _ => series.push_back((ts, c.cpu, c.mem_used)),
+                }
             }
         }
         let cutoff = ts - keep_secs;
@@ -434,6 +503,7 @@ impl ServerState {
         self.container_history.retain(|_, s| !s.is_empty());
         self.latest = Some(sample);
         self.docker = docker;
+        self.findings = crate::suggest::analyze(self);
     }
 }
 
@@ -484,5 +554,53 @@ pub fn fmt_duration(secs: u64) -> String {
         format!("{m}m {}s", secs % 60)
     } else {
         format!("{secs}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(ts: i64, cpu: f32) -> Sample {
+        Sample {
+            ts,
+            cpu: CpuUsage {
+                total: cpu,
+                ..Default::default()
+            },
+            cores: vec![cpu, 0.0],
+            mem_total: 100,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_long_range_keeps_a_fixed_number_of_points() {
+        // One sample every 2 seconds for a day, shown over 24 hours: 120 seconds per point.
+        let mut state = ServerState::default();
+        let day = 86_400;
+        for i in 0..(day / 2) {
+            state.push(sample(i * 2, (i % 60) as f32), DockerState::Unknown, day);
+        }
+        assert_eq!(state.history.len() as i64, HISTORY_POINTS);
+        // Each point is the mean of its 60 samples: 0, 1, ... 59.
+        let point = &state.history[10];
+        assert!((point.cpu.total - 29.5).abs() < 0.01, "{}", point.cpu.total);
+        assert!((point.cores[0] - 29.5).abs() < 0.01);
+        assert_eq!(point.ts % 120, 118);
+        assert!(state.latest.is_some());
+    }
+
+    #[test]
+    fn a_short_range_keeps_every_sample() {
+        let mut state = ServerState::default();
+        for i in 0..100 {
+            state.push(sample(i * 2, i as f32), DockerState::Unknown, 300);
+        }
+        assert_eq!(state.history.len(), 100);
+        assert_eq!(state.history[7].cpu.total, 7.0);
+        // Older than the range: dropped.
+        state.push(sample(1000, 1.0), DockerState::Unknown, 300);
+        assert!(state.history.front().unwrap().ts >= 700);
     }
 }

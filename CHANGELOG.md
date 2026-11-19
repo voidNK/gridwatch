@@ -4,6 +4,15 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.10.3
+
+- Fixed: gridwatch became sluggish and froze for many seconds with a large history. Changing the
+  range loads in the background now, and the database averages the samples instead of handing
+  every one to the program. The suggestions are worked out once per sample, not for every drawn
+  frame. Over a long range the charts keep a fixed number of points instead of growing by the hour.
+  Deleting old samples no longer reads the whole database, and no longer blocks the window.
+- History of servers that are no longer in the list is removed at start.
+
 ## 0.10.2
 
 - Rows can be selected in every table: a click marks a row, another click lets it go. The mark
