@@ -116,6 +116,8 @@ fn main() -> eframe::Result {
     {
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(update::sync_bundle_version);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("gridwatch")

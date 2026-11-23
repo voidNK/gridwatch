@@ -449,8 +449,11 @@ mod tests {
         let mut t = Tracker::default();
         let start = Instant::now();
         let disk = alert("disk", Severity::Warning);
-        assert_eq!(t.update(&[disk.clone()], start), vec![disk.clone()]);
-        assert!(t.update(&[disk.clone()], start + Duration::from_secs(5)).is_empty());
+        assert_eq!(t.update(std::slice::from_ref(&disk), start), vec![disk.clone()]);
+        assert!(
+            t.update(std::slice::from_ref(&disk), start + Duration::from_secs(5))
+                .is_empty()
+        );
 
         // A second problem is reported on its own.
         let load = alert("load", Severity::Warning);
@@ -472,10 +475,16 @@ mod tests {
 
         // Gone briefly and back: still known. Gone for long: reported again.
         assert!(t.update(&[], start + Duration::from_secs(30)).is_empty());
-        assert!(t.update(&[disk.clone()], start + Duration::from_secs(60)).is_empty());
+        assert!(
+            t.update(std::slice::from_ref(&disk), start + Duration::from_secs(60))
+                .is_empty()
+        );
         let later = start + Duration::from_secs(60) + FORGET_AFTER;
         assert!(t.update(&[], later).is_empty());
-        assert_eq!(t.update(&[disk.clone()], later + Duration::from_secs(5)), vec![disk]);
+        assert_eq!(
+            t.update(std::slice::from_ref(&disk), later + Duration::from_secs(5)),
+            vec![disk]
+        );
     }
 
     #[test]

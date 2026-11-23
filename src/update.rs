@@ -179,13 +179,70 @@ pub fn install(release: &Release) -> Result<()> {
     // Inside an application bundle the signature covers the program; sign the bundle
     // again so macOS keeps accepting it. Failing here does not undo the update.
     #[cfg(target_os = "macos")]
-    if let Some(bundle) = current.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) {
-        let _ = std::process::Command::new("codesign")
-            .args(["--force", "--deep", "--sign", "-"])
-            .arg(bundle)
-            .output();
+    if let Some(bundle) = bundle(&current) {
+        write_bundle_version(bundle, &release.version);
+        sign(bundle);
     }
     Ok(())
+}
+
+/// The application bundle the program sits in, if it does.
+#[cfg(target_os = "macos")]
+fn bundle(program: &std::path::Path) -> Option<&std::path::Path> {
+    program.ancestors().find(|p| p.extension().is_some_and(|e| e == "app"))
+}
+
+#[cfg(target_os = "macos")]
+fn sign(bundle: &std::path::Path) {
+    let _ = std::process::Command::new("codesign")
+        .args(["--force", "--deep", "--sign", "-"])
+        .arg(bundle)
+        .output();
+}
+
+/// `Info.plist` with another version number in it.
+#[cfg(any(target_os = "macos", test))]
+fn plist_with_version(plist: &str, version: &str) -> String {
+    let mut text = plist.to_string();
+    for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
+        let Some(key_at) = text.find(&format!("<key>{key}</key>")) else {
+            continue;
+        };
+        let Some(open) = text[key_at..].find("<string>").map(|i| key_at + i + "<string>".len()) else {
+            continue;
+        };
+        let Some(close) = text[open..].find("</string>").map(|i| open + i) else {
+            continue;
+        };
+        text.replace_range(open..close, version);
+    }
+    text
+}
+
+/// Put the version into the bundle's `Info.plist`; says whether it changed anything.
+#[cfg(target_os = "macos")]
+fn write_bundle_version(bundle: &std::path::Path, version: &str) -> bool {
+    let path = bundle.join("Contents").join("Info.plist");
+    let Ok(plist) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let wanted = plist_with_version(&plist, version);
+    wanted != plist && std::fs::write(&path, wanted).is_ok()
+}
+
+/// macOS takes the version it shows under "About gridwatch" and in Finder from the
+/// bundle's `Info.plist`, and an update replaces only the program inside the bundle.
+/// Versions before 0.10.5 left the file as it was installed, so it is set right at start.
+#[cfg(target_os = "macos")]
+pub fn sync_bundle_version() {
+    let Ok(current) = std::env::current_exe() else {
+        return;
+    };
+    if let Some(bundle) = bundle(&current)
+        && write_bundle_version(bundle, env!("CARGO_PKG_VERSION"))
+    {
+        sign(bundle);
+    }
 }
 
 /// Start the program again; the caller closes this instance.
@@ -199,6 +256,16 @@ pub fn restart() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sets_the_version_in_a_plist() {
+        let plist = include_str!("../packaging/macos/Info.plist").replace("@VERSION@", "0.9.3");
+        let updated = plist_with_version(&plist, "0.10.5");
+        assert_eq!(updated.matches("<string>0.10.5</string>").count(), 2);
+        assert!(!updated.contains("0.9.3"));
+        assert!(updated.contains("<string>11.0</string>"));
+        assert_eq!(plist_with_version(&updated, "0.10.5"), updated);
+    }
 
     #[test]
     fn compares_versions_by_number() {

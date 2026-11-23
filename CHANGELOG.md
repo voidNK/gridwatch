@@ -4,6 +4,13 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.10.5
+
+- Fixed: on macOS "About gridwatch" and Finder kept showing the version that was first installed
+  after an update from inside gridwatch. The update now writes the new version into the app, and
+  an app that was updated before is set right the next time it starts.
+- The button that ends a process is labelled Kill.
+
 ## 0.10.4
 
 - Fixed: on Windows, notifications appeared under the name "Windows PowerShell". They now carry

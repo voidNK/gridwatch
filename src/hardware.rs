@@ -501,7 +501,7 @@ fn mac(lines: &[&str]) -> Hardware {
 mod tests {
     use super::*;
 
-    fn props<'a>(item: &'a HwItem) -> Vec<(&'a str, &'a str)> {
+    fn props(item: &HwItem) -> Vec<(&str, &str)> {
         item.props.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
     }
 
