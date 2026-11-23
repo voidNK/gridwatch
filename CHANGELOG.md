@@ -9,6 +9,10 @@ and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes 
 - Fixed: on macOS "About gridwatch" and Finder kept showing the version that was first installed
   after an update from inside gridwatch. The update now writes the new version into the app, and
   an app that was updated before is set right the next time it starts.
+- Fixed: on macOS, when the keychain did not hand out the stored passwords at start (declined, or
+  the question went unanswered), gridwatch took them for missing. The next password typed in then
+  replaced all stored ones, so every server asked for its password again. Stored passwords are now
+  left alone until the keychain can be read.
 - The button that ends a process is labelled Kill.
 
 ## 0.10.4

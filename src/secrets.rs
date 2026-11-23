@@ -16,14 +16,32 @@ const SHARED: &str = "all servers";
 const ONE_ITEM: bool = cfg!(target_os = "macos");
 
 /// The shared item as read once per run, so the keychain is asked only one time.
-static SHARED_SECRETS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+enum Shared {
+    Unread,
+    Loaded(HashMap<String, String>),
+    /// The item exists but the keychain did not hand it out, for instance because the
+    /// user declined. It must not be taken for empty: the next save would replace it
+    /// and lose the passwords of all other servers.
+    Unavailable,
+}
+
+static SHARED_SECRETS: Mutex<Shared> = Mutex::new(Shared::Unread);
 
 fn entry(account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(SERVICE, account).map_err(|e| e.to_string())
 }
 
+/// What is stored for the account; `None` when nothing is, an error when it cannot be read.
+fn read(account: &str) -> Result<Option<String>, String> {
+    match entry(account)?.get_password() {
+        Ok(secret) => Ok(Some(secret)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn get(account: &str) -> Option<String> {
-    entry(account).ok()?.get_password().ok()
+    read(account).ok().flatten()
 }
 
 fn set(account: &str, secret: &str) -> Result<(), String> {
@@ -38,13 +56,21 @@ fn remove(account: &str) {
 }
 
 /// Run `change` on the secrets of the shared item and write them back if it says so.
-fn with_shared<T>(change: impl FnOnce(&mut HashMap<String, String>) -> (T, bool)) -> Result<T, String> {
+/// With `retry` the keychain is asked again after it refused earlier in this run.
+fn with_shared<T>(retry: bool, change: impl FnOnce(&mut HashMap<String, String>) -> (T, bool)) -> Result<T, String> {
     let mut cache = SHARED_SECRETS.lock().unwrap();
-    let secrets = cache.get_or_insert_with(|| {
-        get(SHARED)
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    });
+    if matches!(*cache, Shared::Unread) || (retry && matches!(*cache, Shared::Unavailable)) {
+        *cache = match read(SHARED) {
+            Ok(text) => Shared::Loaded(
+                text.and_then(|text| serde_json::from_str(&text).ok())
+                    .unwrap_or_default(),
+            ),
+            Err(_) => Shared::Unavailable,
+        };
+    }
+    let Shared::Loaded(secrets) = &mut *cache else {
+        return Err("the keychain did not give access to the stored passwords".to_string());
+    };
     let (result, changed) = change(secrets);
     if changed {
         if secrets.is_empty() {
@@ -60,12 +86,12 @@ fn load_from(one_item: bool, server_id: &str) -> Option<String> {
     if !one_item {
         return get(server_id);
     }
-    if let Some(secret) = with_shared(|all| (all.get(server_id).cloned(), false)).ok()? {
+    if let Some(secret) = with_shared(false, |all| (all.get(server_id).cloned(), false)).ok()? {
         return Some(secret);
     }
     // An entry of its own, written before all secrets shared one item: move it over.
     let old = get(server_id)?;
-    let moved = with_shared(|all| {
+    let moved = with_shared(false, |all| {
         all.insert(server_id.to_string(), old.clone());
         ((), true)
     });
@@ -79,7 +105,7 @@ fn save_to(one_item: bool, server_id: &str, secret: &str) -> Result<(), String> 
     if !one_item {
         return set(server_id, secret);
     }
-    with_shared(|all| {
+    with_shared(true, |all| {
         let changed = all.get(server_id).map(String::as_str) != Some(secret);
         all.insert(server_id.to_string(), secret.to_string());
         ((), changed)
@@ -88,7 +114,7 @@ fn save_to(one_item: bool, server_id: &str, secret: &str) -> Result<(), String> 
 
 fn delete_from(one_item: bool, server_id: &str) {
     if one_item {
-        let _ = with_shared(|all| ((), all.remove(server_id).is_some()));
+        let _ = with_shared(false, |all| ((), all.remove(server_id).is_some()));
     }
     remove(server_id);
 }
@@ -138,7 +164,7 @@ mod tests {
         assert_eq!(load_from(true, b).as_deref(), Some("two ä"));
 
         // What a new start reads from the keychain.
-        *SHARED_SECRETS.lock().unwrap() = None;
+        *SHARED_SECRETS.lock().unwrap() = Shared::Unread;
         assert_eq!(load_from(true, a).as_deref(), Some("one"));
         assert_eq!(load_from(true, "gridwatch-selftest-unknown"), None);
 
