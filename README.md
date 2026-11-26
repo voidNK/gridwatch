@@ -174,6 +174,32 @@ The remote user needs no special rights. To see containers it must be allowed to
 | Config (`config.json`) | `%APPDATA%\gridwatch\config` | `~/.config/gridwatch` | `~/Library/Application Support/gridwatch` |
 | History (`history.sqlite`), `known_hosts` | `%APPDATA%\gridwatch\data` | `~/.local/share/gridwatch` | `~/Library/Application Support/gridwatch` |
 
+## Export to InfluxDB and Grafana
+
+gridwatch can send a copy of its history to an InfluxDB (settings, *Export to InfluxDB*), for
+dashboards in Grafana or as a backup. It sends every ten seconds what is new; when the database
+cannot be reached, it catches up later. A database set up for the first time also gets the stored
+history: nothing older, the last day, or everything, as chosen.
+
+- **InfluxDB 1.x**, also the InfluxDB add-on of Home Assistant: address (`http://host:8086`),
+  database, user and password.
+- **InfluxDB 2.x and later**: address, organisation, bucket and token.
+
+The password or token is kept in the keychain like the server passwords. Over plain `http` it
+travels unencrypted, so outside the local network put the database behind `https`.
+
+| Measurement | Tags | Fields |
+| --- | --- | --- |
+| `gridwatch_system` | `host`, `server_id` | `cpu`, `cpu_user`, `cpu_system`, `cpu_iowait`, `cpu_steal`, `load1`, `load5`, `load15`, `mem_used`, `mem_cached`, `mem_total`, `swap_used`, `net_rx_bps`, `net_tx_bps`, `disk_read_bps`, `disk_write_bps`, `disk_util`, `temp` |
+| `gridwatch_core` | + `core` | `usage` |
+| `gridwatch_temp` | + `chip` | `temp` |
+| `gridwatch_gpu` | + `gpu` | `util`, `mem_used` |
+| `gridwatch_net` | + `iface` | `rx_bps`, `tx_bps` |
+| `gridwatch_container` | + `container` | `cpu`, `mem_used` |
+
+`host` is the name of the server in gridwatch. Percentages are 0-100, memory in bytes, rates in
+bytes per second, temperatures in °C.
+
 ## What a machine has to offer
 
 | | Linux | macOS | This computer on Windows |

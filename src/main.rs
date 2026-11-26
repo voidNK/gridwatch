@@ -6,6 +6,7 @@ mod actions;
 mod app;
 mod collector;
 mod demo;
+mod export;
 mod hardware;
 mod instance;
 #[cfg(windows)]
