@@ -1300,12 +1300,16 @@ Click to switch on or off.",
         }
         let before = self.config.clone();
         let mut open = true;
-        let mut close = false;
+        // Escape closes it as well, unless a list is open: then Escape closes the list.
+        let close = ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !egui::Popup::is_any_open(ctx);
         let mut test = None;
         let mut check_now = false;
         egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
+            // A movable window takes a click on its close button that moves the pointer by
+            // a pixel for the start of a drag, and stays open.
+            .movable(false)
             .resizable(true)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
@@ -1528,8 +1532,6 @@ Click to switch on or off.",
                             } else {
                                 ui.label(w::muted("Demo mode: settings are not saved."));
                             }
-                            ui.add_space(4.0);
-                            close = ui.button("Close").clicked();
                         });
                         ui.separator();
                         ui.allocate_ui_with_layout(column(1.0 / 3.0), Layout::top_down(Align::Min), |ui| {

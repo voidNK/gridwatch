@@ -10,6 +10,9 @@ and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes 
   the Home Assistant add-on, or 2.x), for Grafana dashboards or as a backup. New samples go out every
   ten seconds; what could not be sent is sent later, and a new database also gets the stored history
   of the last day or all of it. The password or token is kept in the keychain. Off by default.
+- Fixed: the X of the settings window often did nothing; a click that moved the pointer by a pixel
+  moved the window instead. The settings window stays in place now and closes with the X or Escape;
+  the Close button at the bottom is gone.
 
 ## 0.10.5
 
