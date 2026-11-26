@@ -2,9 +2,10 @@
 
 use crate::actions::{Command, ContainerAction};
 use crate::collector::{self, Env};
+use crate::export::Exporter;
 use crate::model::*;
 use crate::notify::Notifier;
-use crate::store::{Config, Notifications, Paths, Store, Tone};
+use crate::store::{Config, InfluxHistory, InfluxVersion, Notifications, Paths, Store, Tone};
 use crate::suggest::{self, Severity, Suggestion};
 use crate::tray::{self, Tray};
 use crate::update::{self, Release};
@@ -142,7 +143,14 @@ pub struct App {
     /// How many reloads are running, for the note in the top bar.
     history_jobs: Arc<AtomicUsize>,
     screenshots: Option<Screenshots>,
+    /// Copies the history to an InfluxDB; not in demo mode.
+    exporter: Option<Exporter>,
+    /// Password or token for the InfluxDB, like the server passwords kept in the keychain.
+    influx_secret: String,
 }
+
+/// The keychain entry of the InfluxDB password or token.
+const INFLUX_SECRET: &str = "export:influx";
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Args) -> anyhow::Result<Self> {
@@ -237,6 +245,8 @@ impl App {
             last_prune: Instant::now(),
             history_request: Arc::default(),
             history_jobs: Arc::default(),
+            exporter: None,
+            influx_secret: String::new(),
             screenshots,
             config,
         };
@@ -261,7 +271,12 @@ impl App {
                         app.secrets.insert(cfg.id.clone(), secret);
                     }
                 }
+                // Only when set up: on macOS every read from the keychain may ask the user.
+                if !app.config.influx.url.is_empty() {
+                    app.influx_secret = secrets::load(INFLUX_SECRET).unwrap_or_default();
+                }
             }
+            app.exporter = Some(Exporter::start(app.env.store.clone()));
         }
         for (i, cfg) in app.config.servers.clone().into_iter().enumerate() {
             let server = app.start(cfg, i);
@@ -645,6 +660,10 @@ impl eframe::App for App {
         if self.last_prune.elapsed() > Duration::from_secs(3600) {
             self.last_prune = Instant::now();
             self.prune_in_background();
+        }
+        if let Some(exporter) = &self.exporter {
+            let servers = self.servers.iter().map(|s| (s.cfg.id.clone(), s.cfg.name.clone()));
+            exporter.update(&self.config.influx, &self.influx_secret, servers);
         }
         // Keep the time axis moving even when no sample arrives.
         ctx.request_repaint_after(Duration::from_secs(1));
@@ -1163,6 +1182,118 @@ Click to switch on or off.",
         self.save_config();
     }
 
+    /// The settings of the copy to InfluxDB, with how it is going.
+    fn influx_settings(&mut self, ui: &mut Ui) {
+        w::section(
+            ui,
+            "Export to InfluxDB",
+            "a copy of the history, for Grafana or as a backup",
+        );
+        let ix = &mut self.config.influx;
+        ui.checkbox(&mut ix.enabled, "Send the samples of all servers to an InfluxDB");
+        let mut secret_done = false;
+        ui.add_enabled_ui(ix.enabled, |ui| {
+            egui::Grid::new("influx-form")
+                .num_columns(2)
+                .spacing([16.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Address");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut ix.url)
+                            .hint_text("http://homeassistant.local:8086")
+                            .desired_width(300.0),
+                    )
+                    .on_hover_text(
+                        "Where InfluxDB listens, usually port 8086.\nHome Assistant's InfluxDB add-on is version 1.x; \
+                         create a database and a user for gridwatch in its web interface.",
+                    );
+                    ui.end_row();
+                    ui.label("Version");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut ix.version, InfluxVersion::V1, "1.x");
+                        ui.selectable_value(&mut ix.version, InfluxVersion::V2, "2.x and later");
+                    });
+                    ui.end_row();
+                    let field = |ui: &mut Ui, text: &mut String| {
+                        ui.add(egui::TextEdit::singleline(text).desired_width(200.0));
+                    };
+                    let secret_label = match ix.version {
+                        InfluxVersion::V1 => {
+                            ui.label("Database");
+                            field(ui, &mut ix.database);
+                            ui.end_row();
+                            ui.label("User");
+                            field(ui, &mut ix.user);
+                            ui.end_row();
+                            "Password"
+                        }
+                        InfluxVersion::V2 => {
+                            ui.label("Organisation");
+                            field(ui, &mut ix.org);
+                            ui.end_row();
+                            ui.label("Bucket");
+                            field(ui, &mut ix.database);
+                            ui.end_row();
+                            "Token"
+                        }
+                    };
+                    ui.label(secret_label);
+                    let secret = ui.add(
+                        egui::TextEdit::singleline(&mut self.influx_secret)
+                            .password(true)
+                            .desired_width(200.0),
+                    );
+                    secret_done = secret.lost_focus();
+                    ui.end_row();
+                    ui.label("At first send");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("influx-history")
+                            .width(140.0)
+                            .selected_text(ix.history.label())
+                            .show_ui(ui, |ui| {
+                                for choice in InfluxHistory::ALL {
+                                    ui.selectable_value(&mut ix.history, choice, choice.label());
+                                }
+                            });
+                        ui.label(w::muted("once per server and database"));
+                    });
+                    ui.end_row();
+                    if let Some(exporter) = &self.exporter
+                        && ix.enabled
+                    {
+                        let status = exporter.status();
+                        ui.label("Status");
+                        if let Some(error) = &status.error {
+                            ui.label(RichText::new(format!("{error}; trying again every minute")).color(w::CRITICAL));
+                        } else if let Some(at) = status.last_ok {
+                            let at = chrono::TimeZone::timestamp_opt(&chrono::Local, at, 0)
+                                .single()
+                                .map(|t| t.format("%H:%M:%S").to_string())
+                                .unwrap_or_default();
+                            let more = if status.catching_up {
+                                ", sending older samples…"
+                            } else {
+                                ""
+                            };
+                            ui.label(w::muted(format!("{} values sent, last at {at}{more}", status.lines)));
+                        } else {
+                            ui.label(w::muted("nothing sent yet"));
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+        if secret_done {
+            if self.influx_secret.is_empty() {
+                secrets::delete(INFLUX_SECRET);
+            } else if self.config.remember_secrets
+                && let Err(e) = secrets::save(INFLUX_SECRET, &self.influx_secret)
+            {
+                eprintln!("gridwatch: cannot save the InfluxDB password in the system keychain: {e}");
+            }
+        }
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
             return;
@@ -1326,6 +1457,8 @@ Click to switch on or off.",
                                 });
                             if self.paths.is_some() {
                                 ui.add_space(6.0);
+                                self.influx_settings(ui);
+                                ui.add_space(6.0);
                                 w::section(ui, "Actions", "off unless you allow them; stopping and ending ask first");
                                 ui.checkbox(&mut self.config.allow_container_actions, "Start, stop and restart docker containers")
                                     .on_hover_text("Adds buttons to the Docker tab.\nThe user gridwatch logs in with must be allowed to run docker: member of the docker group, or root.");
@@ -1435,6 +1568,11 @@ Click to switch on or off.",
                     Some(secret) if self.config.remember_secrets => self.remember(&server.cfg.id, secret),
                     _ => secrets::delete(&server.cfg.id),
                 }
+            }
+            if self.config.remember_secrets && !self.influx_secret.is_empty() {
+                let _ = secrets::save(INFLUX_SECRET, &self.influx_secret);
+            } else if !self.config.remember_secrets {
+                secrets::delete(INFLUX_SECRET);
             }
         }
         if self.config != before {

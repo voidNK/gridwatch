@@ -38,6 +38,95 @@ pub struct Config {
     /// Offer to end processes.
     #[serde(default)]
     pub allow_kill: bool,
+    /// A copy of the history in an InfluxDB.
+    #[serde(default)]
+    pub influx: Influx,
+}
+
+/// Where to send the history, see `export.rs`. The password or token is kept in the keychain.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Influx {
+    pub enabled: bool,
+    /// e.g. `http://homeassistant.local:8086`
+    pub url: String,
+    pub version: InfluxVersion,
+    /// The database (1.x) or the bucket (2.x).
+    pub database: String,
+    /// 2.x only.
+    pub org: String,
+    /// 1.x only; empty when the database needs no login.
+    pub user: String,
+    /// How far back to start for a server that was not sent to this database before.
+    pub history: InfluxHistory,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InfluxVersion {
+    /// InfluxDB 1.x, also the Home Assistant add-on: database, user and password.
+    #[default]
+    V1,
+    /// InfluxDB 2.x and later: organisation, bucket and token.
+    V2,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InfluxHistory {
+    /// Only what is measured from now on.
+    Nothing,
+    #[default]
+    Day,
+    /// Everything that is stored.
+    All,
+}
+
+impl InfluxHistory {
+    pub const ALL: [InfluxHistory; 3] = [InfluxHistory::Nothing, InfluxHistory::Day, InfluxHistory::All];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            InfluxHistory::Nothing => "nothing older",
+            InfluxHistory::Day => "the last day",
+            InfluxHistory::All => "all stored history",
+        }
+    }
+
+    /// The moment to start after, for a server sent for the first time.
+    pub fn start(self, now: i64) -> i64 {
+        match self {
+            InfluxHistory::Nothing => now,
+            InfluxHistory::Day => now - 86400,
+            InfluxHistory::All => 0,
+        }
+    }
+}
+
+impl Default for Influx {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            version: InfluxVersion::V1,
+            database: "gridwatch".to_string(),
+            org: String::new(),
+            user: String::new(),
+            history: InfluxHistory::Day,
+        }
+    }
+}
+
+impl Influx {
+    /// Names the database the data goes to. What was sent is remembered per target, so
+    /// another address or database starts over and gets the history as well.
+    pub fn target(&self) -> String {
+        format!(
+            "{}|{:?}|{}|{}",
+            self.url.trim().trim_end_matches('/'),
+            self.version,
+            self.database.trim(),
+            self.org.trim()
+        )
+    }
 }
 
 fn yes() -> bool {
@@ -130,6 +219,7 @@ impl Default for Config {
             tray: true,
             allow_container_actions: false,
             allow_kill: false,
+            influx: Influx::default(),
         }
     }
 }
@@ -197,7 +287,46 @@ CREATE TABLE IF NOT EXISTS container_samples (
     cpu REAL, mem_used INTEGER,
     PRIMARY KEY (server_id, ts, name)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS export_cursors (
+    target TEXT NOT NULL, server_id TEXT NOT NULL, ts INTEGER NOT NULL,
+    PRIMARY KEY (target, server_id)
+) WITHOUT ROWID;
 ";
+
+/// The columns of a history point, in the order [`point_from_row`] reads them.
+const POINT_COLUMNS: &str = "ts, cpu, cpu_user, cpu_system, cpu_iowait, cpu_steal, load1, load5, load15,
+    mem_used, mem_total, swap_used, rx_bps, tx_bps, temp, cores,
+    disk_read, disk_write, disk_util, temps, gpus, nets, mem_cached";
+
+fn point_from_row(r: &rusqlite::Row) -> rusqlite::Result<HistPoint> {
+    let number = |i: usize| r.get::<_, Option<f64>>(i).map(|v| v.unwrap_or(0.0));
+    Ok(HistPoint {
+        ts: r.get(0)?,
+        cpu: CpuUsage {
+            total: number(1)? as f32,
+            user: number(2)? as f32,
+            system: number(3)? as f32,
+            iowait: number(4)? as f32,
+            steal: number(5)? as f32,
+        },
+        load: [number(6)? as f32, number(7)? as f32, number(8)? as f32],
+        mem_used: number(9)? as u64,
+        mem_total: r.get::<_, Option<i64>>(10)?.unwrap_or(0) as u64,
+        swap_used: number(11)? as u64,
+        rx_bps: number(12)?,
+        tx_bps: number(13)?,
+        temp: r.get::<_, Option<f64>>(14)?.map(|t| t as f32),
+        cores: json(r.get(15)?),
+        // Rows written by older versions have no values in the columns from here on.
+        disk_read_bps: number(16)?,
+        disk_write_bps: number(17)?,
+        disk_util: r.get::<_, Option<f64>>(18)?.map(|u| u as f32),
+        temps: json(r.get(19)?),
+        gpus: json(r.get(20)?),
+        nets: json(r.get(21)?),
+        mem_cached: number(22)? as u64,
+    })
+}
 
 /// Columns added after the first release; databases created before get them on open.
 const ADDED_COLUMNS: [&str; 7] = [
@@ -311,36 +440,61 @@ impl Store {
                     AVG(disk_read), AVG(disk_write), AVG(disk_util), temps, gpus, nets, AVG(mem_cached)
              FROM samples WHERE server_id = ?1 AND ts >= ?2 GROUP BY ts / ?3 ORDER BY ts / ?3",
         )?;
-        let number = |r: &rusqlite::Row, i: usize| r.get::<_, Option<f64>>(i).map(|v| v.unwrap_or(0.0));
-        let rows = stmt.query_map(params![server_id, since, bucket], |r| {
-            Ok(HistPoint {
-                ts: r.get(0)?,
-                cpu: CpuUsage {
-                    total: number(r, 1)? as f32,
-                    user: number(r, 2)? as f32,
-                    system: number(r, 3)? as f32,
-                    iowait: number(r, 4)? as f32,
-                    steal: number(r, 5)? as f32,
-                },
-                load: [number(r, 6)? as f32, number(r, 7)? as f32, number(r, 8)? as f32],
-                mem_used: number(r, 9)? as u64,
-                mem_total: r.get::<_, Option<i64>>(10)?.unwrap_or(0) as u64,
-                swap_used: number(r, 11)? as u64,
-                rx_bps: number(r, 12)?,
-                tx_bps: number(r, 13)?,
-                temp: r.get::<_, Option<f64>>(14)?.map(|t| t as f32),
-                cores: json(r.get(15)?),
-                // Rows written by older versions have no values in the columns from here on.
-                disk_read_bps: number(r, 16)?,
-                disk_write_bps: number(r, 17)?,
-                disk_util: r.get::<_, Option<f64>>(18)?.map(|u| u as f32),
-                temps: json(r.get(19)?),
-                gpus: json(r.get(20)?),
-                nets: json(r.get(21)?),
-                mem_cached: number(r, 22)? as u64,
-            })
-        })?;
+        let rows = stmt.query_map(params![server_id, since, bucket], point_from_row)?;
         rows.collect::<rusqlite::Result<VecDeque<_>>>().map_err(Into::into)
+    }
+
+    /// Up to `limit` samples newer than `after`, as they were measured, oldest first.
+    pub fn samples_after(&self, server_id: &str, after: i64, limit: usize) -> Result<Vec<HistPoint>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {POINT_COLUMNS} FROM samples WHERE server_id = ?1 AND ts > ?2 ORDER BY ts LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![server_id, after, limit as i64], point_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// The container samples with `after < ts <= until`: time, name, CPU and memory.
+    pub fn container_samples_between(
+        &self,
+        server_id: &str,
+        after: i64,
+        until: i64,
+    ) -> Result<Vec<(i64, String, f32, u64)>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT ts, name, cpu, mem_used FROM container_samples
+             WHERE server_id = ?1 AND ts > ?2 AND ts <= ?3 ORDER BY ts",
+        )?;
+        let rows = stmt.query_map(params![server_id, after, until], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get::<_, Option<f32>>(2)?.unwrap_or(0.0),
+                r.get::<_, Option<i64>>(3)?.unwrap_or(0) as u64,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// The newest sample of the server that has been sent to `target`, if any was.
+    pub fn export_cursor(&self, target: &str, server_id: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT ts FROM export_cursors WHERE target = ?1 AND server_id = ?2")?;
+        let mut rows = stmt.query(params![target, server_id])?;
+        Ok(match rows.next()? {
+            Some(row) => Some(row.get(0)?),
+            None => None,
+        })
+    }
+
+    pub fn set_export_cursor(&self, target: &str, server_id: &str, ts: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO export_cursors VALUES (?1, ?2, ?3)",
+            params![target, server_id, ts],
+        )?;
+        Ok(())
     }
 
     /// CPU and memory of every container at the given moments: the timestamps of the
@@ -415,6 +569,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM samples WHERE server_id = ?1", params![server_id])?;
         conn.execute("DELETE FROM container_samples WHERE server_id = ?1", params![server_id])?;
+        conn.execute("DELETE FROM export_cursors WHERE server_id = ?1", params![server_id])?;
         Ok(())
     }
 }

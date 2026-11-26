@@ -4,6 +4,13 @@ The version is raised with every change that reaches users: the last number for 
 the middle number for a new feature. It is set in `Cargo.toml` and shown in the top bar
 and by `gridwatch --version`. A tag `v<version>` on GitHub builds and publishes the release.
 
+## 0.11.0
+
+- **Export to InfluxDB**: gridwatch can send a copy of its history to an InfluxDB (1.x, including
+  the Home Assistant add-on, or 2.x), for Grafana dashboards or as a backup. New samples go out every
+  ten seconds; what could not be sent is sent later, and a new database also gets the stored history
+  of the last day or all of it. The password or token is kept in the keychain. Off by default.
+
 ## 0.10.5
 
 - Fixed: on macOS "About gridwatch" and Finder kept showing the version that was first installed
